@@ -14,26 +14,26 @@ export type SubdivisionMode = "frontier" | "global"
 export type LayoutParams = {
   layoutVersion: number
   seed: number
-  sampleInPlace: boolean
-  maxPixelSize: number
-  /** Resolution-aware grid unit in photo pixels. */
-  basePixelScale: number
+  randomSample: boolean
+  maxCellSize: number
+  /** Resolution-aware grid unit in pixels. */
+  baseCellSize: number
   sourceWidth: number
   sourceHeight: number
   layoutMode: LayoutMode
   /** Subdivision pass count (1–7). Ignored in standard mode. */
   subdivisionLoops: number
-  /** Which Pixel pool is eligible each loop. Ignored in standard mode. */
+  /** Which Cell pool is eligible each loop. Ignored in standard mode. */
   subdivisionMode: SubdivisionMode
   /** UI 10–100: split intensity (10 = none, 100 = max). */
   subdivisionRate: number
 }
 
 /**
- * Cached Phase 1 App Pixel — geometry + stable attrs; mask/effects applied at composite time.
- * Coordinates (`x`, `y`, `width`, `height`, `sx`, `sy`) are in photo pixels.
+ * Cached Phase 1 Cell — geometry + stable attrs; mask/effects applied at composite time.
+ * Coordinates (`x`, `y`, `width`, `height`, `sx`, `sy`) are in pixels.
  */
-export type CachedPixel = {
+export type CachedCell = {
   x: number
   y: number
   width: number
@@ -45,9 +45,9 @@ export type CachedPixel = {
 
 /**
  * Full Phase 1 floor result.
- * `basePixelScale` is resolution-dependent and required by Phase 2 noise sampling.
+ * `baseCellSize` is resolution-dependent and required by Phase 2 noise sampling.
  */
 export type CachedLayout = {
-  basePixelScale: number
-  pixels: CachedPixel[]
+  baseCellSize: number
+  cells: CachedCell[]
 }

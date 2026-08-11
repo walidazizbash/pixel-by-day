@@ -8,8 +8,10 @@
   --color-background: var(--background);
   --color-foreground: var(--foreground);
   --font-sans: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
+  --font-body: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
+  --font-heading: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
+  --font-footer: var(--font-geist-mono), ui-monospace, monospace;
   --font-mono: var(--font-geist-mono);
-  --font-heading: var(--font-sans);
   --color-sidebar-ring: var(--sidebar-ring);
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
@@ -122,12 +124,41 @@
     @apply border-border outline-ring/50;
   }
   html {
-    @apply font-sans antialiased;
+    @apply font-body antialiased;
   }
   body {
-    @apply font-sans antialiased;
+    @apply font-body antialiased;
     background-color: #000000;
     color: #f5f5f7;
+  }
+
+  h1,
+  h2,
+  h3,
+  h4,
+  h5,
+  h6 {
+    @apply font-heading;
+  }
+
+  footer,
+  .font-footer {
+    @apply tracking-tight;
+    word-spacing: -0.14em;
+  }
+
+  footer {
+    @apply font-footer;
+  }
+
+  /* Mobile editor shell: lock document scroll; panes manage their own overflow */
+  @media (max-width: 767px) {
+    html,
+    body {
+      height: 100%;
+      overflow: hidden;
+      overscroll-behavior: none;
+    }
   }
 
   button:not(:disabled),
@@ -138,6 +169,15 @@
   label[for],
   a[href] {
     cursor: pointer;
+  }
+
+  /* touch-action is not inherited — apply to the whole slider tree (incl. nested range inputs) */
+  [data-slot="slider"],
+  [data-slot="slider"] *,
+  [data-slot="slider-track"],
+  [data-slot="slider-range"],
+  [data-slot="slider-thumb"] {
+    touch-action: none;
   }
 }
 

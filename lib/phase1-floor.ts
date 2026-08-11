@@ -3,14 +3,14 @@
  * Do not retune FLOOR_TUNING here without an explicit packing task.
  *
  * Terminology:
- * - App Pixel: structural Mondrian block (formerly "tile").
- * - basePixelScale: grid unit in photo pixels (formerly "base cell size").
- * - Photo pixel: a raw photographic sample coordinate from the uploaded source.
+ * - Cell: structural Mondrian block of the layout grid.
+ * - baseCellSize: grid unit measured in pixels.
+ * - Pixel: a raw sample coordinate from the uploaded source image.
  */
 
 import type {
+  CachedCell,
   CachedLayout,
-  CachedPixel,
   EffectSettings,
   LayoutParams,
 } from "@/lib/effect-types"
@@ -19,23 +19,23 @@ import type {
 export const LAYOUT_CACHE_VERSION = 22
 
 /**
- * Structural floor minimum in App Pixel size units (grid spans).
+ * Structural floor minimum in Cell size units (grid spans).
  * 1×1 cleanup still guarantees full coverage.
  */
-const STRUCTURAL_MIN_PIXEL_SIZE = 1
+const STRUCTURAL_MIN_CELL_SIZE = 1
 
 /**
- * Resolution-aware base grid scale in photo pixels.
- * Targets ~100 App Pixel units across the longest edge
- * (10 photo-pixel units at ~1000px source).
+ * Resolution-aware base grid scale in pixels.
+ * Targets ~100 Cell units across the longest edge
+ * (10 pixel units at ~1000px source).
  */
-export function computeBasePixelScale(width: number, height: number): number {
+export function computeBaseCellSize(width: number, height: number): number {
   return Math.max(1, Math.round(Math.max(width, height) / 100))
 }
 
 /**
  * Phase 1 floor packing — Version 1 tuning knobs.
- * Spans are in App Pixel size units; absolute ranges are clamped to UI max pixel size.
+ * Spans are in Cell size units; absolute ranges are clamped to UI max cell size.
  * Locked to the former neutral size-bias (50) baseline.
  */
 const FLOOR_TUNING = {
@@ -43,7 +43,7 @@ const FLOOR_TUNING = {
   anchorCountMax: 5,
   /** Preferred minimum center-to-center distance between large anchors (grid units). */
   anchorMinSeparation: 8,
-  /** Lower fraction of [STRUCTURAL_MIN_PIXEL_SIZE, maxPixelSize] used for large anchor sizes. */
+  /** Lower fraction of [STRUCTURAL_MIN_CELL_SIZE, maxCellSize] used for large anchor sizes. */
   largeSpanFrom: 0.55,
 } as const
 
@@ -58,7 +58,7 @@ type SpanTier = {
   maxSpan: number
 }
 
-export type Phase1GeometryPixel = {
+export type Phase1GeometryCell = {
   x: number
   y: number
   width: number
@@ -87,9 +87,9 @@ export function extractLayoutParams(
   sourceWidth: number,
   sourceHeight: number
 ): LayoutParams {
-  const maxPixelSize = Math.max(
-    STRUCTURAL_MIN_PIXEL_SIZE,
-    Math.min(20, Number(settings.maxPixelSize) || STRUCTURAL_MIN_PIXEL_SIZE)
+  const maxCellSize = Math.max(
+    STRUCTURAL_MIN_CELL_SIZE,
+    Math.min(20, Number(settings.maxCellSize) || STRUCTURAL_MIN_CELL_SIZE)
   )
   const layoutMode =
     settings.layoutMode === "subdivision" ? "subdivision" : "standard"
@@ -98,9 +98,9 @@ export function extractLayoutParams(
   return {
     layoutVersion: LAYOUT_CACHE_VERSION,
     seed: settings.seed,
-    sampleInPlace: settings.sampleInPlace,
-    maxPixelSize,
-    basePixelScale: computeBasePixelScale(sourceWidth, sourceHeight),
+    randomSample: settings.randomSample,
+    maxCellSize,
+    baseCellSize: computeBaseCellSize(sourceWidth, sourceHeight),
     sourceWidth,
     sourceHeight,
     layoutMode,
@@ -114,9 +114,9 @@ export function layoutParamsEqual(a: LayoutParams, b: LayoutParams) {
   return (
     a.layoutVersion === b.layoutVersion &&
     a.seed === b.seed &&
-    a.sampleInPlace === b.sampleInPlace &&
-    a.maxPixelSize === b.maxPixelSize &&
-    a.basePixelScale === b.basePixelScale &&
+    a.randomSample === b.randomSample &&
+    a.maxCellSize === b.maxCellSize &&
+    a.baseCellSize === b.baseCellSize &&
     a.sourceWidth === b.sourceWidth &&
     a.sourceHeight === b.sourceHeight &&
     a.layoutMode === b.layoutMode &&
@@ -155,11 +155,11 @@ function shuffleInPlace<T>(items: T[], rng: () => number) {
   }
 }
 
-function deriveSpanTiers(maxPixelSize: number): {
+function deriveSpanTiers(maxCellSize: number): {
   large: SpanTier
 } {
-  const spanMin = STRUCTURAL_MIN_PIXEL_SIZE
-  const spanMax = Math.max(spanMin, maxPixelSize)
+  const spanMin = STRUCTURAL_MIN_CELL_SIZE
+  const spanMax = Math.max(spanMin, maxCellSize)
   const range = spanMax - spanMin
   const largeFrom = FLOOR_TUNING.largeSpanFrom
 
@@ -255,14 +255,14 @@ function collectCandidateOrigins(
 
 function placeSquare(
   claimed: Uint8Array,
-  pixels: FloorSquare[],
+  cells: FloorSquare[],
   gridWidth: number,
   gx: number,
   gy: number,
   span: number
 ) {
   markSquareClaimed(claimed, gridWidth, gx, gy, span)
-  pixels.push({ gx, gy, span })
+  cells.push({ gx, gy, span })
 }
 
 function anchorsTooClose(
@@ -288,7 +288,7 @@ function anchorsTooClose(
 
 function placeLargeAnchors(
   claimed: Uint8Array,
-  pixels: FloorSquare[],
+  cells: FloorSquare[],
   gridWidth: number,
   gridHeight: number,
   tier: SpanTier,
@@ -331,7 +331,7 @@ function placeLargeAnchors(
       ) {
         continue
       }
-      placeSquare(claimed, pixels, gridWidth, gx, gy, span)
+      placeSquare(claimed, cells, gridWidth, gx, gy, span)
       anchors.push({ gx, gy, span })
     }
   }
@@ -350,40 +350,40 @@ function placeLargeAnchors(
 /**
  * After anchors: fill leftover space with global exact-size passes.
  *
- * Preferred band [STRUCTURAL_MIN_PIXEL_SIZE, maxPixelSize] is exhausted first
+ * Preferred band [STRUCTURAL_MIN_CELL_SIZE, maxCellSize] is exhausted first
  * (largest → smallest). Sizes below the preferred floor (still ≥ 2) may appear
  * in a later pass; 1×1 cleanup remains the final fallback.
  */
 function fillRemainingProgressive(
   claimed: Uint8Array,
-  pixels: FloorSquare[],
+  cells: FloorSquare[],
   gridWidth: number,
   gridHeight: number,
-  maxPixelSize: number,
+  maxCellSize: number,
   rng: () => number
 ) {
-  if (maxPixelSize < 2) return
+  if (maxCellSize < 2) return
 
-  const preferredMin = STRUCTURAL_MIN_PIXEL_SIZE
-  const preferredMax = Math.max(preferredMin, maxPixelSize)
+  const preferredMin = STRUCTURAL_MIN_CELL_SIZE
+  const preferredMax = Math.max(preferredMin, maxCellSize)
   const absoluteMinSpan = 2
 
   // Preferred composition: finish each size completely before stepping down.
   for (let span = preferredMax; span >= Math.max(absoluteMinSpan, preferredMin); span--) {
-    fillExactSizePass(claimed, pixels, gridWidth, gridHeight, span, rng)
+    fillExactSizePass(claimed, cells, gridWidth, gridHeight, span, rng)
   }
 
   // Below-preferred fallback only after preferred sizes are exhausted.
   const fallbackTop = Math.max(absoluteMinSpan, preferredMin) - 1
   for (let span = Math.min(preferredMax, fallbackTop); span >= absoluteMinSpan; span--) {
-    fillExactSizePass(claimed, pixels, gridWidth, gridHeight, span, rng)
+    fillExactSizePass(claimed, cells, gridWidth, gridHeight, span, rng)
   }
 }
 
 /** One global pass: shuffle empty origins and place as many exact `span` squares as fit. */
 function fillExactSizePass(
   claimed: Uint8Array,
-  pixels: FloorSquare[],
+  cells: FloorSquare[],
   gridWidth: number,
   gridHeight: number,
   span: number,
@@ -405,13 +405,13 @@ function fillExactSizePass(
     const { gx, gy } = candidates[i]
     if (claimed[gy * gridWidth + gx] === 1) continue
     if (!canPlaceSquare(claimed, gridWidth, gridHeight, gx, gy, span)) continue
-    placeSquare(claimed, pixels, gridWidth, gx, gy, span)
+    placeSquare(claimed, cells, gridWidth, gx, gy, span)
   }
 }
 
 function fillOneByOneCleanup(
   claimed: Uint8Array,
-  pixels: FloorSquare[],
+  cells: FloorSquare[],
   gridWidth: number,
   gridHeight: number
 ) {
@@ -419,7 +419,7 @@ function fillOneByOneCleanup(
     const row = gy * gridWidth
     for (let gx = 0; gx < gridWidth; gx++) {
       if (claimed[row + gx] === 0) {
-        placeSquare(claimed, pixels, gridWidth, gx, gy, 1)
+        placeSquare(claimed, cells, gridWidth, gx, gy, 1)
       }
     }
   }
@@ -428,24 +428,24 @@ function fillOneByOneCleanup(
 export function gridDimensions(
   width: number,
   height: number,
-  basePixelScale = computeBasePixelScale(width, height)
+  baseCellSize = computeBaseCellSize(width, height)
 ) {
   return {
-    gridWidth: Math.max(1, Math.ceil(width / basePixelScale)),
-    gridHeight: Math.max(1, Math.ceil(height / basePixelScale)),
-    basePixelScale,
+    gridWidth: Math.max(1, Math.ceil(width / baseCellSize)),
+    gridHeight: Math.max(1, Math.ceil(height / baseCellSize)),
+    baseCellSize,
   }
 }
 
 /** Phase 1 invariant: every grid unit is claimed exactly once before masking. */
 export function verifyFloorCoverage(
-  pixels: FloorSquare[],
+  cells: FloorSquare[],
   gridWidth: number,
   gridHeight: number
 ) {
   const claimed = new Uint8Array(gridWidth * gridHeight)
-  for (let i = 0; i < pixels.length; i++) {
-    const p = pixels[i]
+  for (let i = 0; i < cells.length; i++) {
+    const p = cells[i]
     for (let dy = 0; dy < p.span; dy++) {
       const row = (p.gy + dy) * gridWidth + p.gx
       for (let dx = 0; dx < p.span; dx++) {
@@ -468,27 +468,30 @@ export function verifyFloorCoverage(
   }
 }
 
-/** Clamp an App Pixel rectangle so it stays inside the photo-pixel bounds. */
-function clampPixelToPhotoPixels(
+/** Clamp a Cell rectangle so it stays inside the pixel bounds. */
+function clampCellToPixels(
   x: number,
   y: number,
-  widthPhotoPixels: number,
-  heightPhotoPixels: number,
+  widthPixels: number,
+  heightPixels: number,
   imageWidth: number,
   imageHeight: number
 ) {
-  let w = widthPhotoPixels
-  let h = heightPhotoPixels
+  let w = widthPixels
+  let h = heightPixels
   if (x + w > imageWidth) w = imageWidth - x
   if (y + h > imageHeight) h = imageHeight - y
   return { x, y, width: w, height: h }
 }
 
-export function verifyPhotoPixelCoverage(
-  layout: Array<Phase1GeometryPixel>,
+export function verifyPixelCoverage(
+  layout: Array<Phase1GeometryCell>,
   imageWidth: number,
   imageHeight: number
 ) {
+  // Full-frame coverage scan is O(W×H); keep it in non-production builds only.
+  if (process.env.NODE_ENV === "production") return
+
   const covered = new Uint8Array(imageWidth * imageHeight)
   for (let i = 0; i < layout.length; i++) {
     const p = layout[i]
@@ -503,13 +506,13 @@ export function verifyPhotoPixelCoverage(
     if (covered[i] === 0) {
       const x = i % imageWidth
       const y = (i / imageWidth) | 0
-      throw new Error(`Phase 1 photo-pixel gap at (${x}, ${y})`)
+      throw new Error(`Phase 1 pixel gap at (${x}, ${y})`)
     }
   }
 }
 
 export function layoutGeometrySignature(
-  layout: Array<Phase1GeometryPixel>
+  layout: Array<Phase1GeometryCell>
 ): string {
   const parts = new Array(layout.length)
   for (let i = 0; i < layout.length; i++) {
@@ -523,27 +526,27 @@ export function layoutGeometrySignature(
 export function packSquareFloor(
   gridWidth: number,
   gridHeight: number,
-  maxPixelSize: number,
+  maxCellSize: number,
   seed: number
 ): FloorSquare[] {
   const claimed = new Uint8Array(gridWidth * gridHeight)
-  const pixels: FloorSquare[] = []
+  const cells: FloorSquare[] = []
   const rng = createSeededRng(seed ^ 0xa341316c)
-  const tiers = deriveSpanTiers(maxPixelSize)
+  const tiers = deriveSpanTiers(maxCellSize)
 
-  placeLargeAnchors(claimed, pixels, gridWidth, gridHeight, tiers.large, rng)
+  placeLargeAnchors(claimed, cells, gridWidth, gridHeight, tiers.large, rng)
   fillRemainingProgressive(
     claimed,
-    pixels,
+    cells,
     gridWidth,
     gridHeight,
-    maxPixelSize,
+    maxCellSize,
     rng
   )
-  fillOneByOneCleanup(claimed, pixels, gridWidth, gridHeight)
-  verifyFloorCoverage(pixels, gridWidth, gridHeight)
+  fillOneByOneCleanup(claimed, cells, gridWidth, gridHeight)
+  verifyFloorCoverage(cells, gridWidth, gridHeight)
 
-  return pixels
+  return cells
 }
 
 export function buildLayoutFromFloor(
@@ -551,20 +554,20 @@ export function buildLayoutFromFloor(
   settings: EffectSettings,
   imageWidth: number,
   imageHeight: number,
-  basePixelScale: number
-): CachedPixel[] {
+  baseCellSize: number
+): CachedCell[] {
   const seed = settings.seed >>> 0
   const attrSeed = (seed ^ 0x9e3779b9) >>> 0
   const sampleSeed = (seed ^ 0x85ebca6b) >>> 0
-  const sampleInPlace = settings.sampleInPlace
-  const pixels: CachedPixel[] = []
+  const randomSample = settings.randomSample
+  const cells: CachedCell[] = []
 
   for (let i = 0; i < raw.length; i++) {
     const part = raw[i]
-    const size = part.span * basePixelScale
-    const originX = part.gx * basePixelScale
-    const originY = part.gy * basePixelScale
-    const clamped = clampPixelToPhotoPixels(
+    const size = part.span * baseCellSize
+    const originX = part.gx * baseCellSize
+    const originY = part.gy * baseCellSize
+    const clamped = clampCellToPixels(
       originX,
       originY,
       size,
@@ -576,10 +579,7 @@ export function buildLayoutFromFloor(
 
     let sx: number
     let sy: number
-    if (sampleInPlace) {
-      sx = clamped.x
-      sy = clamped.y
-    } else {
+    if (randomSample) {
       const maxSx = imageWidth - clamped.width
       const maxSy = imageHeight - clamped.height
       sx =
@@ -589,9 +589,12 @@ export function buildLayoutFromFloor(
         (hash2D(part.gx + 17, part.gy + 31, sampleSeed) *
           ((maxSy > 0 ? maxSy : 0) + 1)) |
         0
+    } else {
+      sx = clamped.x
+      sy = clamped.y
     }
 
-    pixels.push({
+    cells.push({
       x: clamped.x,
       y: clamped.y,
       width: clamped.width,
@@ -602,10 +605,10 @@ export function buildLayoutFromFloor(
     })
   }
 
-  return pixels
+  return cells
 }
 
-function makeSubdivisionPixel(
+function makeSubdivisionCell(
   x: number,
   y: number,
   width: number,
@@ -615,20 +618,20 @@ function makeSubdivisionPixel(
   imageHeight: number,
   attrSeed: number,
   sampleSeed: number
-): CachedPixel | null {
+): CachedCell | null {
   if (width < 1 || height < 1) return null
 
   let sx: number
   let sy: number
-  if (settings.sampleInPlace) {
-    sx = x
-    sy = y
-  } else {
+  if (settings.randomSample) {
     const maxSx = imageWidth - width
     const maxSy = imageHeight - height
     sx = (hash2D(x, y, sampleSeed) * ((maxSx > 0 ? maxSx : 0) + 1)) | 0
     sy =
       (hash2D(x + 17, y + 31, sampleSeed) * ((maxSy > 0 ? maxSy : 0) + 1)) | 0
+  } else {
+    sx = x
+    sy = y
   }
 
   return {
@@ -643,38 +646,38 @@ function makeSubdivisionPixel(
 }
 
 /**
- * Split one Pixel into four quadrants.
+ * Split one Cell into four quadrants.
  * Uses floor/ceil-style remainders so odd widths/heights never leave gaps.
  */
-function subdividePixelIntoQuadrants(
-  pixel: CachedPixel,
+function subdivideCellIntoQuadrants(
+  cell: CachedCell,
   settings: EffectSettings,
   imageWidth: number,
   imageHeight: number,
   attrSeed: number,
   sampleSeed: number
-): CachedPixel[] {
-  const leftW = Math.floor(pixel.width / 2)
-  const rightW = Math.ceil(pixel.width / 2)
-  const topH = Math.floor(pixel.height / 2)
-  const bottomH = Math.ceil(pixel.height / 2)
+): CachedCell[] {
+  const leftW = Math.floor(cell.width / 2)
+  const rightW = Math.ceil(cell.width / 2)
+  const topH = Math.floor(cell.height / 2)
+  const bottomH = Math.ceil(cell.height / 2)
 
   const rects = [
-    { x: pixel.x, y: pixel.y, width: leftW, height: topH },
-    { x: pixel.x + leftW, y: pixel.y, width: rightW, height: topH },
-    { x: pixel.x, y: pixel.y + topH, width: leftW, height: bottomH },
+    { x: cell.x, y: cell.y, width: leftW, height: topH },
+    { x: cell.x + leftW, y: cell.y, width: rightW, height: topH },
+    { x: cell.x, y: cell.y + topH, width: leftW, height: bottomH },
     {
-      x: pixel.x + leftW,
-      y: pixel.y + topH,
+      x: cell.x + leftW,
+      y: cell.y + topH,
       width: rightW,
       height: bottomH,
     },
   ]
 
-  const out: CachedPixel[] = []
+  const out: CachedCell[] = []
   for (let i = 0; i < rects.length; i++) {
     const r = rects[i]
-    const child = makeSubdivisionPixel(
+    const child = makeSubdivisionCell(
       r.x,
       r.y,
       r.width,
@@ -692,13 +695,13 @@ function subdividePixelIntoQuadrants(
 
 /**
  * V2 Phase 1: recursive quadrant subdivision with probabilistic splits.
- * Starts from one full-frame Pixel; each loop may split eligible Pixels into 4.
+ * Starts from one full-frame Cell; each loop may split eligible Cells into 4.
  */
 function generateSubdivisionLayout(
   settings: EffectSettings,
   imageWidth: number,
   imageHeight: number
-): CachedPixel[] {
+): CachedCell[] {
   const seed = settings.seed >>> 0
   const attrSeed = (seed ^ 0x9e3779b9) >>> 0
   const sampleSeed = (seed ^ 0x85ebca6b) >>> 0
@@ -710,7 +713,7 @@ function generateSubdivisionLayout(
   // Map UI 10→0 and 100→1 so the left end is "no splits", not mid-slider.
   const threshold = (rate - 10) / 90
 
-  const root = makeSubdivisionPixel(
+  const root = makeSubdivisionCell(
     0,
     0,
     imageWidth,
@@ -723,36 +726,36 @@ function generateSubdivisionLayout(
   )
   if (!root) return []
 
-  // Minimum rate: keep the single full-frame Pixel (slider all the way left).
+  // Minimum rate: keep the single full-frame Cell (slider all the way left).
   if (threshold <= 0) return [root]
 
-  let pixels: CachedPixel[] = [root]
-  let frontier: CachedPixel[] = [root]
+  let cells: CachedCell[] = [root]
+  let frontier: CachedCell[] = [root]
 
   for (let loop = 0; loop < loops; loop++) {
-    const targetPool = mode === "frontier" ? frontier : pixels
-    const nextFrontier: CachedPixel[] = []
+    const targetPool = mode === "frontier" ? frontier : cells
+    const nextFrontier: CachedCell[] = []
     const targetSet = new Set(targetPool)
-    const nextPixels: CachedPixel[] = []
+    const nextCells: CachedCell[] = []
 
-    // Preserve Pixels that are not in this loop's target pool (frontier mode).
-    for (let i = 0; i < pixels.length; i++) {
-      const pixel = pixels[i]
-      if (!targetSet.has(pixel)) nextPixels.push(pixel)
+    // Preserve Cells that are not in this loop's target pool (frontier mode).
+    for (let i = 0; i < cells.length; i++) {
+      const cell = cells[i]
+      if (!targetSet.has(cell)) nextCells.push(cell)
     }
 
     for (let i = 0; i < targetPool.length; i++) {
-      const pixel = targetPool[i]
+      const cell = targetPool[i]
       // Frontier: always open the root on loop 0 so mid-slider cannot collapse
-      // to a single Pixel when the first RNG roll fails.
+      // to a single Cell when the first RNG roll fails.
       let shouldSubdivide =
         mode === "frontier" && loop === 0 ? true : rng() < threshold
       // 1×N / N×1 / 1×1 cannot be physically subdivided without gaps/zeros.
-      if (pixel.width <= 1 || pixel.height <= 1) shouldSubdivide = false
+      if (cell.width <= 1 || cell.height <= 1) shouldSubdivide = false
 
       if (shouldSubdivide) {
-        const quads = subdividePixelIntoQuadrants(
-          pixel,
+        const quads = subdivideCellIntoQuadrants(
+          cell,
           settings,
           imageWidth,
           imageHeight,
@@ -760,19 +763,19 @@ function generateSubdivisionLayout(
           sampleSeed
         )
         for (let q = 0; q < quads.length; q++) {
-          nextPixels.push(quads[q])
+          nextCells.push(quads[q])
           if (mode === "frontier") nextFrontier.push(quads[q])
         }
       } else {
-        nextPixels.push(pixel)
+        nextCells.push(cell)
       }
     }
 
-    pixels = nextPixels
+    cells = nextCells
     if (mode === "frontier") frontier = nextFrontier
   }
 
-  return pixels
+  return cells
 }
 
 /** Build the complete Phase 1 layout (geometry + stable attrs). */
@@ -782,41 +785,41 @@ export function generateLayout(
   imageHeight: number
 ): CachedLayout {
   const seed = settings.seed >>> 0
-  const { gridWidth, gridHeight, basePixelScale } = gridDimensions(
+  const { gridWidth, gridHeight, baseCellSize } = gridDimensions(
     imageWidth,
     imageHeight
   )
 
   if (settings.layoutMode === "subdivision") {
-    const pixels = generateSubdivisionLayout(
+    const cells = generateSubdivisionLayout(
       settings,
       imageWidth,
       imageHeight
     )
-    verifyPhotoPixelCoverage(pixels, imageWidth, imageHeight)
-    return { basePixelScale, pixels }
+    verifyPixelCoverage(cells, imageWidth, imageHeight)
+    return { baseCellSize, cells }
   }
 
-  const maxPixelSize = Math.max(
-    STRUCTURAL_MIN_PIXEL_SIZE,
-    Math.min(20, Number(settings.maxPixelSize) || STRUCTURAL_MIN_PIXEL_SIZE)
+  const maxCellSize = Math.max(
+    STRUCTURAL_MIN_CELL_SIZE,
+    Math.min(20, Number(settings.maxCellSize) || STRUCTURAL_MIN_CELL_SIZE)
   )
 
-  const floor = packSquareFloor(gridWidth, gridHeight, maxPixelSize, seed)
-  const pixels = buildLayoutFromFloor(
+  const floor = packSquareFloor(gridWidth, gridHeight, maxCellSize, seed)
+  const cells = buildLayoutFromFloor(
     floor,
     settings,
     imageWidth,
     imageHeight,
-    basePixelScale
+    baseCellSize
   )
-  verifyPhotoPixelCoverage(pixels, imageWidth, imageHeight)
-  return { basePixelScale, pixels }
+  verifyPixelCoverage(cells, imageWidth, imageHeight)
+  return { baseCellSize, cells }
 }
 
 export function geometryOnly(
-  layout: Array<Phase1GeometryPixel>
-): Phase1GeometryPixel[] {
+  layout: Array<Phase1GeometryCell>
+): Phase1GeometryCell[] {
   return layout.map((p) => ({
     x: p.x,
     y: p.y,

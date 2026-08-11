@@ -2,7 +2,7 @@
 
 import type {
   CachedLayout,
-  CachedPixel,
+  CachedCell,
   EffectName,
   EffectSettings,
   EffectWorkerInMessage,
@@ -20,8 +20,6 @@ import { applySmearStyles } from "@/lib/smear-styles"
 const DITHER_SCALE = 2
 const PIXELATE_SIZE = 4
 const PIXELATE_COLOR_STEPS = 4
-/** Fixed opacity for Overlay Debug (Version 1 — no UI slider). */
-const DEBUG_OVERLAY_OPACITY = 0.35
 
 const BAYER_MATRIX = [
   0, 128, 32, 160, 8, 136, 40, 168, 192, 64, 224, 96, 200, 72, 232, 104, 48,
@@ -44,7 +42,7 @@ let cachedLayout: CachedLayout | null = null
 let cachedLayoutParams: LayoutParams | null = null
 let activeJobId = 0
 
-/** Reused full-frame work surface — zero per-pixel canvas allocations. */
+/** Reused full-frame work surface — zero per-cell canvas allocations. */
 let workCanvas: OffscreenCanvas | null = null
 let workCtx: OffscreenCanvasRenderingContext2D | null = null
 let workWidth = 0
@@ -98,7 +96,7 @@ function ensureWorkSurface(width: number, height: number) {
 // ─── Phase 2: mask sampling (procedural noise) ────────────────────────────────
 
 type MaskSample = {
-  /** True when the finished pixel should receive effects. */
+  /** True when the finished cell should receive effects. */
   on: boolean
 }
 
@@ -106,19 +104,19 @@ type MaskSample = {
 const MASK_NOISE_CONTRAST = 1.5
 
 /**
- * Sample the Phase 2 mask for one structural App Pixel.
- * Uses the Pixel's placement (`pixel.x` / `pixel.y`) so the mask stays blocky
- * at grid resolution — not continuous per photo-pixel sampling.
+ * Sample the Phase 2 mask for one structural Cell.
+ * Uses the Cell's placement (`cell.x` / `cell.y`) so the mask stays blocky
+ * at grid resolution — not continuous per-pixel sampling.
  */
-function samplePixelMask(
-  pixel: CachedPixel,
+function sampleCellMask(
+  cell: CachedCell,
   settings: EffectSettings,
-  basePixelScale: number
+  baseCellSize: number
 ): MaskSample {
-  const scale = Math.max(1, basePixelScale)
-  // Structural App Pixel center → grid units (blocky mask resolution).
-  const gx = (pixel.x + pixel.width * 0.5) / scale
-  const gy = (pixel.y + pixel.height * 0.5) / scale
+  const scale = Math.max(1, baseCellSize)
+  // Structural Cell center → grid units (blocky mask resolution).
+  const gx = (cell.x + cell.width * 0.5) / scale
+  const gy = (cell.y + cell.height * 0.5) / scale
 
   // UI noiseScale is 1–100; map to the internal 0.01–0.5 frequency range.
   const uiScale = Math.max(1, Math.min(100, Number(settings.noiseScale) || 1))
@@ -164,26 +162,26 @@ function chooseEffect(randomVal: number, settings: EffectSettings): EffectName {
   return "original"
 }
 
-// ─── Step 4: compositePixels — one global buffer, inline effect math ───────────
+// ─── Step 4: compositeCells — one global buffer, inline effect math ───────────
 
 function applyDitherGlobal(
   data: Uint8ClampedArray,
   fullWidth: number,
-  pixelX: number,
-  pixelY: number,
+  cellX: number,
+  cellY: number,
   width: number,
   height: number
 ) {
   const scale = DITHER_SCALE
   for (let localY = 0; localY < height; localY++) {
-    const absY = pixelY + localY
+    const absY = cellY + localY
     for (let localX = 0; localX < width; localX++) {
-      const absX = pixelX + localX
+      const absX = cellX + localX
       const qAbsX = absX - (absX % scale)
       const qAbsY = absY - (absY % scale)
-      const qLocalX = Math.min(width - 1, Math.max(0, qAbsX - pixelX))
-      const qLocalY = Math.min(height - 1, Math.max(0, qAbsY - pixelY))
-      const qIndex = ((pixelY + qLocalY) * fullWidth + (pixelX + qLocalX)) * 4
+      const qLocalX = Math.min(width - 1, Math.max(0, qAbsX - cellX))
+      const qLocalY = Math.min(height - 1, Math.max(0, qAbsY - cellY))
+      const qIndex = ((cellY + qLocalY) * fullWidth + (cellX + qLocalX)) * 4
 
       const r = data[qIndex]
       const g = data[qIndex + 1]
@@ -206,13 +204,13 @@ function applyDitherGlobal(
 function applyInvertGlobal(
   data: Uint8ClampedArray,
   fullWidth: number,
-  pixelX: number,
-  pixelY: number,
+  cellX: number,
+  cellY: number,
   width: number,
   height: number
 ) {
   for (let localY = 0; localY < height; localY++) {
-    const row = (pixelY + localY) * fullWidth + pixelX
+    const row = (cellY + localY) * fullWidth + cellX
     for (let localX = 0; localX < width; localX++) {
       const i = (row + localX) * 4
       data[i] = 255 - data[i]
@@ -225,13 +223,13 @@ function applyInvertGlobal(
 function applySurrealGlobal(
   data: Uint8ClampedArray,
   fullWidth: number,
-  pixelX: number,
-  pixelY: number,
+  cellX: number,
+  cellY: number,
   width: number,
   height: number
 ) {
   for (let localY = 0; localY < height; localY++) {
-    const row = (pixelY + localY) * fullWidth + pixelX
+    const row = (cellY + localY) * fullWidth + cellX
     for (let localX = 0; localX < width; localX++) {
       const i = (row + localX) * 4
       data[i] = SURREAL_R[data[i]]
@@ -249,24 +247,24 @@ function applyPixelateGlobal(
   data: Uint8ClampedArray,
   fullWidth: number,
   fullHeight: number,
-  pixelX: number,
-  pixelY: number,
+  cellX: number,
+  cellY: number,
   width: number,
   height: number
 ) {
   const blockSize = PIXELATE_SIZE
   const colorSteps = PIXELATE_COLOR_STEPS
   const stepFactor = 255 / (colorSteps - 1)
-  const pixelRight = pixelX + width
-  const pixelBottom = pixelY + height
+  const cellRight = cellX + width
+  const cellBottom = cellY + height
 
-  const blockStartY = pixelY - (pixelY % blockSize)
-  for (let blockY = blockStartY; blockY < pixelBottom; blockY += blockSize) {
-    const writeEndY = Math.min(blockY + blockSize, pixelBottom)
+  const blockStartY = cellY - (cellY % blockSize)
+  for (let blockY = blockStartY; blockY < cellBottom; blockY += blockSize) {
+    const writeEndY = Math.min(blockY + blockSize, cellBottom)
 
-    const blockStartX = pixelX - (pixelX % blockSize)
-    for (let blockX = blockStartX; blockX < pixelRight; blockX += blockSize) {
-      const writeEndX = Math.min(blockX + blockSize, pixelRight)
+    const blockStartX = cellX - (cellX % blockSize)
+    for (let blockX = blockStartX; blockX < cellRight; blockX += blockSize) {
+      const writeEndX = Math.min(blockX + blockSize, cellRight)
 
       const centerX = Math.min(
         fullWidth - 1,
@@ -282,8 +280,8 @@ function applyPixelateGlobal(
       const g = quantizeChannel(data[centerIndex + 1], stepFactor)
       const b = quantizeChannel(data[centerIndex + 2], stepFactor)
 
-      const writeStartY = Math.max(blockY, pixelY)
-      const writeStartX = Math.max(blockX, pixelX)
+      const writeStartY = Math.max(blockY, cellY)
+      const writeStartX = Math.max(blockX, cellX)
       for (let y = writeStartY; y < writeEndY; y++) {
         const row = y * fullWidth
         for (let x = writeStartX; x < writeEndX; x++) {
@@ -302,99 +300,75 @@ function applyEffectGlobal(
   fullWidth: number,
   fullHeight: number,
   effect: EffectName,
-  pixelX: number,
-  pixelY: number,
+  cellX: number,
+  cellY: number,
   width: number,
   height: number
 ) {
   if (effect === "dither") {
-    applyDitherGlobal(data, fullWidth, pixelX, pixelY, width, height)
+    applyDitherGlobal(data, fullWidth, cellX, cellY, width, height)
   } else if (effect === "invert") {
-    applyInvertGlobal(data, fullWidth, pixelX, pixelY, width, height)
+    applyInvertGlobal(data, fullWidth, cellX, cellY, width, height)
   } else if (effect === "surreal") {
-    applySurrealGlobal(data, fullWidth, pixelX, pixelY, width, height)
+    applySurrealGlobal(data, fullWidth, cellX, cellY, width, height)
   } else if (effect === "pixelate") {
     applyPixelateGlobal(
       data,
       fullWidth,
       fullHeight,
-      pixelX,
-      pixelY,
+      cellX,
+      cellY,
       width,
       height
     )
   }
 }
 
-function fillMaskDebugGlobal(
-  data: Uint8ClampedArray,
-  fullWidth: number,
-  pixelX: number,
-  pixelY: number,
-  width: number,
-  height: number,
-  on: boolean
-) {
-  const g = on ? 255 : 0
-  for (let localY = 0; localY < height; localY++) {
-    const row = (pixelY + localY) * fullWidth + pixelX
-    for (let localX = 0; localX < width; localX++) {
-      const i = (row + localX) * 4
-      data[i] = g
-      data[i + 1] = g
-      data[i + 2] = g
-      data[i + 3] = 255
-    }
-  }
-}
-
-/** Blend a solid gray (0 or 1) over existing pixels at fixed opacity — debug overlay only. */
-function blendMaskOverlayGlobal(
-  data: Uint8ClampedArray,
-  fullWidth: number,
-  pixelX: number,
-  pixelY: number,
-  width: number,
-  height: number,
-  on: boolean,
-  opacity: number
-) {
-  const src = on ? 255 : 0
-  const keep = 1 - opacity
-  for (let localY = 0; localY < height; localY++) {
-    const row = (pixelY + localY) * fullWidth + pixelX
-    for (let localX = 0; localX < width; localX++) {
-      const i = (row + localX) * 4
-      data[i] = data[i] * keep + src * opacity
-      data[i + 1] = data[i + 1] * keep + src * opacity
-      data[i + 2] = data[i + 2] * keep + src * opacity
-    }
-  }
-}
-
-function drawPixelLayoutDebug(
+function drawCellNoiseMapDebug(
   ctx: OffscreenCanvasRenderingContext2D,
-  layout: CachedPixel[],
+  layout: CachedLayout,
+  settings: EffectSettings,
   width: number,
-  height: number,
-  overlay: boolean
+  height: number
 ) {
-  if (!overlay) {
-    // Phase 1 floor only — no source image, no Phase 2 mask.
-    ctx.fillStyle = "#000000"
-    ctx.fillRect(0, 0, width, height)
+  // Phase 2 mask as Cell blocks — same sampleCellMask as the real composite.
+  ctx.fillStyle = "#000000"
+  ctx.fillRect(0, 0, width, height)
+
+  const cells = layout.cells
+  const baseCellSize = layout.baseCellSize
+  ctx.fillStyle = "#ffffff"
+
+  for (let i = 0; i < cells.length; i++) {
+    const cell = cells[i]
+    const w = cell.width
+    const h = cell.height
+    if (w < 1 || h < 1) continue
+    if (!sampleCellMask(cell, settings, baseCellSize).on) continue
+    ctx.fillRect(cell.x, cell.y, w, h)
   }
+}
+
+function drawCellLayoutDebug(
+  ctx: OffscreenCanvasRenderingContext2D,
+  layout: CachedCell[],
+  width: number,
+  height: number
+) {
+  // Phase 1 floor only — no source image, no Phase 2 mask.
+  ctx.fillStyle = "#000000"
+  ctx.fillRect(0, 0, width, height)
 
   ctx.lineWidth = 1
   for (let i = 0; i < layout.length; i++) {
-    const pixel = layout[i]
-    const w = pixel.width
-    const h = pixel.height
+    const cell = layout[i]
+    const w = cell.width
+    const h = cell.height
     if (w < 1 || h < 1) continue
-    ctx.fillStyle = `hsl(${Math.floor(pixel.randomVal * 360)}, 70%, 50%)`
-    ctx.fillRect(pixel.x, pixel.y, w, h)
+    ctx.fillStyle = `hsl(${Math.floor(cell.randomVal * 360)}, 70%, 50%)`
+    ctx.fillRect(cell.x, cell.y, w, h)
     ctx.strokeStyle = "rgba(255, 255, 255, 0.8)"
-    ctx.strokeRect(pixel.x, pixel.y, w, h)
+    ctx.strokeRect(cell.x, cell.y, w, h)
   }
 }
 
@@ -410,75 +384,28 @@ function drawNormalEffects(
 
   const imageData = ctx.getImageData(0, 0, width, height)
   const data = imageData.data
-  const pixels = layout.pixels
-  const basePixelScale = layout.basePixelScale
+  const cells = layout.cells
+  const baseCellSize = layout.baseCellSize
 
-  for (let i = 0; i < pixels.length; i++) {
-    const pixel = pixels[i]
-    const mask = samplePixelMask(pixel, settings, basePixelScale)
+  for (let i = 0; i < cells.length; i++) {
+    const cell = cells[i]
+    const mask = sampleCellMask(cell, settings, baseCellSize)
 
-    // OFF pixels leave the source background untouched.
+    // OFF cells leave the source background untouched.
     if (!mask.on) continue
 
-    applySmearStyles(data, width, height, pixel, settings)
-    const effect = chooseEffect(pixel.randomVal, settings)
+    applySmearStyles(data, width, height, cell, settings)
+    const effect = chooseEffect(cell.randomVal, settings)
     if (effect !== "original") {
       applyEffectGlobal(
         data,
         width,
         height,
         effect,
-        pixel.x,
-        pixel.y,
-        pixel.width,
-        pixel.height
-      )
-    }
-  }
-
-  ctx.putImageData(imageData, 0, 0)
-}
-
-function drawBooleanMaskDebug(
-  ctx: OffscreenCanvasRenderingContext2D,
-  layout: CachedLayout,
-  settings: EffectSettings,
-  width: number,
-  height: number,
-  overlay: boolean
-) {
-  if (!overlay) {
-    ctx.drawImage(cachedSource!, 0, 0, width, height)
-  }
-
-  const imageData = ctx.getImageData(0, 0, width, height)
-  const data = imageData.data
-  const pixels = layout.pixels
-  const basePixelScale = layout.basePixelScale
-
-  for (let i = 0; i < pixels.length; i++) {
-    const pixel = pixels[i]
-    const mask = samplePixelMask(pixel, settings, basePixelScale)
-    if (overlay) {
-      blendMaskOverlayGlobal(
-        data,
-        width,
-        pixel.x,
-        pixel.y,
-        pixel.width,
-        pixel.height,
-        mask.on,
-        DEBUG_OVERLAY_OPACITY
-      )
-    } else {
-      fillMaskDebugGlobal(
-        data,
-        width,
-        pixel.x,
-        pixel.y,
-        pixel.width,
-        pixel.height,
-        mask.on
+        cell.x,
+        cell.y,
+        cell.width,
+        cell.height
       )
     }
   }
@@ -493,37 +420,20 @@ function drawComposite(
   width: number,
   height: number
 ) {
-  const overlayDebug = settings.overlayDebug
-
-  if (settings.showPixelLayout) {
-    if (overlayDebug) {
-      // Finished effects first, then translucent Phase 1 floor on top.
-      drawNormalEffects(ctx, layout, settings, width, height)
-      ctx.save()
-      ctx.globalAlpha = DEBUG_OVERLAY_OPACITY
-      drawPixelLayoutDebug(ctx, layout.pixels, width, height, true)
-      ctx.restore()
-    } else {
-      drawPixelLayoutDebug(ctx, layout.pixels, width, height, false)
-    }
+  if (settings.showCellLayout) {
+    drawCellLayoutDebug(ctx, layout.cells, width, height)
     return
   }
 
   if (settings.showNoiseMap) {
-    if (overlayDebug) {
-      // Finished effects first, then translucent boolean mask on top.
-      drawNormalEffects(ctx, layout, settings, width, height)
-      drawBooleanMaskDebug(ctx, layout, settings, width, height, true)
-    } else {
-      drawBooleanMaskDebug(ctx, layout, settings, width, height, false)
-    }
+    drawCellNoiseMapDebug(ctx, layout, settings, width, height)
     return
   }
 
   drawNormalEffects(ctx, layout, settings, width, height)
 }
 
-function compositePixels(
+function compositeCells(
   layout: CachedLayout,
   settings: EffectSettings,
   width: number,
@@ -564,7 +474,13 @@ async function exportComposite(settings: EffectSettings) {
 
   const width = cachedSource.width
   const height = cachedSource.height
-  const layout = resolveLayout(settings, width, height)
+  // Always export the finished mosaic (never Visualize Noise / Cell Layout debug).
+  const exportSettings: EffectSettings = {
+    ...settings,
+    showNoiseMap: false,
+    showCellLayout: false,
+  }
+  const layout = resolveLayout(exportSettings, width, height)
 
   const canvas = new OffscreenCanvas(width, height)
   const ctx = canvas.getContext("2d", { willReadFrequently: true })
@@ -573,14 +489,7 @@ async function exportComposite(settings: EffectSettings) {
     return
   }
 
-  // Overlay Debug is preview-only — keep export on solid debug/replace or normal render.
-  drawComposite(
-    ctx,
-    layout,
-    { ...settings, overlayDebug: false },
-    width,
-    height
-  )
+  drawComposite(ctx, layout, exportSettings, width, height)
 
   try {
     const blob = await canvas.convertToBlob({ type: "image/png" })
@@ -615,7 +524,7 @@ function renderFrame(jobId: number, settings: EffectSettings) {
     return
   }
 
-  const bitmap = compositePixels(layout, settings, width, height)
+  const bitmap = compositeCells(layout, settings, width, height)
 
   if (isStale(jobId)) {
     bitmap.close()

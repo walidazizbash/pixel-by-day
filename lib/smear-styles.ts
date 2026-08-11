@@ -10,17 +10,17 @@
  * 5. Recursive
  * 6. Strip Feedback
  *
- * All region ops respect rectangular App Pixel bounds (width × height),
- * including edge-clamped non-square Pixels.
+ * All region ops respect rectangular Cell bounds (width × height),
+ * including edge-clamped non-square Cells.
  */
 
 import type {
-  CachedPixel,
+  CachedCell,
   EffectSettings,
 } from "@/lib/effect-types"
 import { hash2D } from "@/lib/phase1-floor"
 
-/** Reused scratch for pixel-local ops (recursive / strip / clean). */
+/** Reused scratch for cell-local ops (recursive / strip / clean). */
 let smearScratch: Uint8ClampedArray | null = null
 let smearScratchCap = 0
 
@@ -44,13 +44,13 @@ function clampInt(v: number, lo: number, hi: number): number {
   return v
 }
 
-/** Deterministic 0–1 value for a pixel + salt. */
-function pixelUnit(
-  pixel: CachedPixel,
+/** Deterministic 0–1 value for a cell + salt. */
+function cellUnit(
+  cell: CachedCell,
   seed: number,
   salt: number
 ): number {
-  return hash2D(pixel.x + salt * 17, pixel.y + salt * 31, seed >>> 0)
+  return hash2D(cell.x + salt * 17, cell.y + salt * 31, seed >>> 0)
 }
 
 /** In-place overlapping blit (unsafe self-feedback when src∩dest). Vertical core. */
@@ -134,19 +134,19 @@ function clampSampleOrigin(
   }
 }
 
-/** Amount 0 baseline: clean sample → Pixel (no smear feedback). */
-function copyPixelBaselineClean(
+/** Amount 0 baseline: clean sample → Cell (no smear feedback). */
+function copyCellBaselineClean(
   data: Uint8ClampedArray,
   fullWidth: number,
   fullHeight: number,
-  pixel: CachedPixel
+  cell: CachedCell
 ) {
-  const width = pixel.width
-  const height = pixel.height
+  const width = cell.width
+  const height = cell.height
   if (width < 1 || height < 1) return
   const clamped = clampSampleOrigin(
-    pixel.sx,
-    pixel.sy,
+    cell.sx,
+    cell.sy,
     width,
     height,
     fullWidth,
@@ -157,8 +157,8 @@ function copyPixelBaselineClean(
     fullWidth,
     clamped.sx,
     clamped.sy,
-    pixel.x,
-    pixel.y,
+    cell.x,
+    cell.y,
     width,
     height
   )
@@ -173,16 +173,16 @@ function applyVerticalSmear(
   data: Uint8ClampedArray,
   fullWidth: number,
   fullHeight: number,
-  pixel: CachedPixel,
+  cell: CachedCell,
   amount: number
 ) {
-  const width = pixel.width
-  const height = pixel.height
+  const width = cell.width
+  const height = cell.height
   if (width < 1 || height < 1) return
 
   const amountClamped = clampAmount(amount)
-  let sx = pixel.sx
-  let sy = pixel.sy
+  let sx = cell.sx
+  let sy = cell.sy
 
   if (amountClamped === 0) {
     const clamped = clampSampleOrigin(
@@ -198,8 +198,8 @@ function applyVerticalSmear(
       fullWidth,
       clamped.sx,
       clamped.sy,
-      pixel.x,
-      pixel.y,
+      cell.x,
+      cell.y,
       width,
       height
     )
@@ -208,9 +208,9 @@ function applyVerticalSmear(
 
   // Former max used enhance=1 at amount 100; map full slider onto that range.
   const enhance = amountClamped / 100
-  const maxUp = Math.max(0, Math.min(height - 1, pixel.y))
-  const targetSy = pixel.y - Math.floor(maxUp * (0.35 + 0.65 * enhance))
-  const targetSx = pixel.x
+  const maxUp = Math.max(0, Math.min(height - 1, cell.y))
+  const targetSy = cell.y - Math.floor(maxUp * (0.35 + 0.65 * enhance))
+  const targetSx = cell.x
   sx = Math.round(sx + (targetSx - sx) * enhance)
   sy = Math.round(sy + (targetSy - sy) * enhance)
 
@@ -232,8 +232,8 @@ function applyVerticalSmear(
       fullWidth,
       sx,
       sy,
-      pixel.x,
-      pixel.y,
+      cell.x,
+      cell.y,
       width,
       height
     )
@@ -282,17 +282,17 @@ function applyHorizontalSmear(
   data: Uint8ClampedArray,
   fullWidth: number,
   fullHeight: number,
-  pixel: CachedPixel,
+  cell: CachedCell,
   amount: number,
   seed: number
 ) {
-  const width = pixel.width
-  const height = pixel.height
+  const width = cell.width
+  const height = cell.height
   if (width < 2 || height < 1) return
 
   const amountClamped = clampAmount(amount)
-  let sx = pixel.sx
-  let sy = pixel.sy
+  let sx = cell.sx
+  let sy = cell.sy
 
   if (amountClamped === 0) {
     const clamped = clampSampleOrigin(
@@ -308,8 +308,8 @@ function applyHorizontalSmear(
       fullWidth,
       clamped.sx,
       clamped.sy,
-      pixel.x,
-      pixel.y,
+      cell.x,
+      cell.y,
       width,
       height
     )
@@ -318,15 +318,15 @@ function applyHorizontalSmear(
 
   // Intensity 0→1 across 1–100; at 100 matches former max (old enhance at amount 100).
   const enhance = amountClamped / 100
-  const rightToLeft = pixelUnit(pixel, seed, 101) >= 0.5
+  const rightToLeft = cellUnit(cell, seed, 101) >= 0.5
 
   const maxSide = Math.max(
     0,
-    Math.min(width - 1, rightToLeft ? fullWidth - pixel.x - width : pixel.x)
+    Math.min(width - 1, rightToLeft ? fullWidth - cell.x - width : cell.x)
   )
   const pull = Math.floor(maxSide * (0.35 + 0.65 * enhance))
-  const targetSx = rightToLeft ? pixel.x + pull : pixel.x - pull
-  const targetSy = pixel.y
+  const targetSx = rightToLeft ? cell.x + pull : cell.x - pull
+  const targetSy = cell.y
   sx = Math.round(sx + (targetSx - sx) * enhance)
   sy = Math.round(sy + (targetSy - sy) * enhance)
 
@@ -348,8 +348,8 @@ function applyHorizontalSmear(
       fullWidth,
       sx,
       sy,
-      pixel.x,
-      pixel.y,
+      cell.x,
+      cell.y,
       width,
       height,
       rightToLeft
@@ -361,17 +361,17 @@ function applyDiagonalSmear(
   data: Uint8ClampedArray,
   fullWidth: number,
   fullHeight: number,
-  pixel: CachedPixel,
+  cell: CachedCell,
   amount: number,
   seed: number
 ) {
-  const width = pixel.width
-  const height = pixel.height
+  const width = cell.width
+  const height = cell.height
   if (width < 2 || height < 2) return
 
   const amountClamped = clampAmount(amount)
-  let sx = pixel.sx
-  let sy = pixel.sy
+  let sx = cell.sx
+  let sy = cell.sy
 
   if (amountClamped === 0) {
     const clamped = clampSampleOrigin(
@@ -387,15 +387,15 @@ function applyDiagonalSmear(
       fullWidth,
       clamped.sx,
       clamped.sy,
-      pixel.x,
-      pixel.y,
+      cell.x,
+      cell.y,
       width,
       height
     )
     return
   }
 
-  const dir = (pixelUnit(pixel, seed, 202) * 4) | 0 // 0..3
+  const dir = (cellUnit(cell, seed, 202) * 4) | 0 // 0..3
   // 0 down-right, 1 down-left, 2 up-right, 3 up-left
   const signX = dir === 0 || dir === 2 ? -1 : 1 // source opposite to cascade
   const signY = dir === 0 || dir === 1 ? -1 : 1
@@ -405,16 +405,16 @@ function applyDiagonalSmear(
   const pullT = 0.35 + 0.65 * enhance
   const maxX =
     signX < 0
-      ? Math.min(width - 1, pixel.x)
-      : Math.min(width - 1, Math.max(0, fullWidth - pixel.x - width))
+      ? Math.min(width - 1, cell.x)
+      : Math.min(width - 1, Math.max(0, fullWidth - cell.x - width))
   const maxY =
     signY < 0
-      ? Math.min(height - 1, pixel.y)
-      : Math.min(height - 1, Math.max(0, fullHeight - pixel.y - height))
+      ? Math.min(height - 1, cell.y)
+      : Math.min(height - 1, Math.max(0, fullHeight - cell.y - height))
   const ox = Math.floor(maxX * pullT)
   const oy = Math.floor(maxY * pullT)
-  const targetSx = pixel.x + signX * ox
-  const targetSy = pixel.y + signY * oy
+  const targetSx = cell.x + signX * ox
+  const targetSy = cell.y + signY * oy
   sx = Math.round(sx + (targetSx - sx) * enhance)
   sy = Math.round(sy + (targetSy - sy) * enhance)
 
@@ -440,7 +440,7 @@ function applyDiagonalSmear(
         if (xForward) {
           for (let col = 0; col < width; col++) {
             const src = ((sy + row) * fullWidth + (sx + col)) * 4
-            const dst = ((pixel.y + row) * fullWidth + (pixel.x + col)) * 4
+            const dst = ((cell.y + row) * fullWidth + (cell.x + col)) * 4
             data[dst] = data[src]
             data[dst + 1] = data[src + 1]
             data[dst + 2] = data[src + 2]
@@ -449,7 +449,7 @@ function applyDiagonalSmear(
         } else {
           for (let col = width - 1; col >= 0; col--) {
             const src = ((sy + row) * fullWidth + (sx + col)) * 4
-            const dst = ((pixel.y + row) * fullWidth + (pixel.x + col)) * 4
+            const dst = ((cell.y + row) * fullWidth + (cell.x + col)) * 4
             data[dst] = data[src]
             data[dst + 1] = data[src + 1]
             data[dst + 2] = data[src + 2]
@@ -462,7 +462,7 @@ function applyDiagonalSmear(
         if (xForward) {
           for (let col = 0; col < width; col++) {
             const src = ((sy + row) * fullWidth + (sx + col)) * 4
-            const dst = ((pixel.y + row) * fullWidth + (pixel.x + col)) * 4
+            const dst = ((cell.y + row) * fullWidth + (cell.x + col)) * 4
             data[dst] = data[src]
             data[dst + 1] = data[src + 1]
             data[dst + 2] = data[src + 2]
@@ -471,7 +471,7 @@ function applyDiagonalSmear(
         } else {
           for (let col = width - 1; col >= 0; col--) {
             const src = ((sy + row) * fullWidth + (sx + col)) * 4
-            const dst = ((pixel.y + row) * fullWidth + (pixel.x + col)) * 4
+            const dst = ((cell.y + row) * fullWidth + (cell.x + col)) * 4
             data[dst] = data[src]
             data[dst + 1] = data[src + 1]
             data[dst + 2] = data[src + 2]
@@ -487,24 +487,24 @@ function applyDriftSmear(
   data: Uint8ClampedArray,
   fullWidth: number,
   fullHeight: number,
-  pixel: CachedPixel,
+  cell: CachedCell,
   amount: number,
   seed: number
 ) {
-  const width = pixel.width
-  const height = pixel.height
+  const width = cell.width
+  const height = cell.height
   if (width < 1 || height < 1) return
 
   const amountClamped = clampAmount(amount)
   if (amountClamped === 0) {
-    copyPixelBaselineClean(data, fullWidth, fullHeight, pixel)
+    copyCellBaselineClean(data, fullWidth, fullHeight, cell)
     return
   }
   if (width < 2 || height < 2) return
 
   // Intensity 0→1 across 1–100; at 100 matches former max.
   const smear = amountClamped / 100
-  const ang = pixelUnit(pixel, seed, 303) * Math.PI * 2
+  const ang = cellUnit(cell, seed, 303) * Math.PI * 2
   const dirX = Math.cos(ang)
   const dirY = Math.sin(ang)
   const passes = 1 + Math.floor(smear * 5)
@@ -513,8 +513,8 @@ function applyDriftSmear(
 
   for (let p = 0; p < passes; p++) {
     const dist = stepPx * (p + 1)
-    const sx = Math.round(pixel.x - dirX * dist)
-    const sy = Math.round(pixel.y - dirY * dist)
+    const sx = Math.round(cell.x - dirX * dist)
+    const sy = Math.round(cell.y - dirY * dist)
     const clamped = clampSampleOrigin(
       sx,
       sy,
@@ -529,29 +529,29 @@ function applyDriftSmear(
       fullWidth,
       clamped.sx,
       clamped.sy,
-      pixel.x,
-      pixel.y,
+      cell.x,
+      cell.y,
       width,
       height
     )
   }
 }
 
-/** Nested scale-copy tunnel inside the pixel (uses scratch). */
+/** Nested scale-copy tunnel inside the cell (uses scratch). */
 function applyRecursiveSmear(
   data: Uint8ClampedArray,
   fullWidth: number,
   fullHeight: number,
-  pixel: CachedPixel,
+  cell: CachedCell,
   amount: number
 ) {
-  const width = pixel.width
-  const height = pixel.height
+  const width = cell.width
+  const height = cell.height
   if (width < 1 || height < 1) return
 
   const amountClamped = clampAmount(amount)
   if (amountClamped === 0) {
-    copyPixelBaselineClean(data, fullWidth, fullHeight, pixel)
+    copyCellBaselineClean(data, fullWidth, fullHeight, cell)
     return
   }
   if (width < 4 || height < 4) return
@@ -562,9 +562,9 @@ function applyRecursiveSmear(
   const scratch = ensureSmearScratch(width * height * 4)
 
   for (let p = 0; p < passes; p++) {
-    // Snapshot current pixel
+    // Snapshot current cell
     for (let row = 0; row < height; row++) {
-      const srcRow = (pixel.y + row) * fullWidth + pixel.x
+      const srcRow = (cell.y + row) * fullWidth + cell.x
       const tmpRow = row * width
       for (let col = 0; col < width; col++) {
         const src = (srcRow + col) * 4
@@ -582,14 +582,14 @@ function applyRecursiveSmear(
     const ox = ((width - innerW) / 2) | 0
     const oy = ((height - innerH) / 2) | 0
 
-    // Nearest-neighbor scale scratch → centered inside pixel (clipped).
+    // Nearest-neighbor scale scratch → centered inside cell (clipped).
     for (let row = 0; row < innerH; row++) {
       const srcY = Math.min(height - 1, ((row * height) / innerH) | 0)
-      const dstY = pixel.y + oy + row
+      const dstY = cell.y + oy + row
       for (let col = 0; col < innerW; col++) {
         const srcX = Math.min(width - 1, ((col * width) / innerW) | 0)
         const src = (srcY * width + srcX) * 4
-        const dst = (dstY * fullWidth + (pixel.x + ox + col)) * 4
+        const dst = (dstY * fullWidth + (cell.x + ox + col)) * 4
         data[dst] = scratch[src]
         data[dst + 1] = scratch[src + 1]
         data[dst + 2] = scratch[src + 2]
@@ -603,24 +603,24 @@ function applyStripFeedback(
   data: Uint8ClampedArray,
   fullWidth: number,
   fullHeight: number,
-  pixel: CachedPixel,
+  cell: CachedCell,
   amount: number,
   seed: number
 ) {
-  const width = pixel.width
-  const height = pixel.height
+  const width = cell.width
+  const height = cell.height
   if (width < 1 || height < 1) return
 
   const amountClamped = clampAmount(amount)
   if (amountClamped === 0) {
-    copyPixelBaselineClean(data, fullWidth, fullHeight, pixel)
+    copyCellBaselineClean(data, fullWidth, fullHeight, cell)
     return
   }
   if (width < 4 || height < 4) return
 
   // Intensity 0→1 across 1–100; at 100 matches former max.
   const smear = amountClamped / 100
-  const horizontalStrip = pixelUnit(pixel, seed, 505) >= 0.5
+  const horizontalStrip = cellUnit(cell, seed, 505) >= 0.5
   // Strip thickness: relatively narrow; amount mainly boosts repetitions.
   const thicknessAxis = horizontalStrip ? height : width
   const thickness = Math.max(
@@ -632,16 +632,16 @@ function applyStripFeedback(
   )
   const repeats = 2 + Math.floor(smear * 6)
 
-  // Choose strip origin inside the sampleable area (layout sample or pixel).
-  const baseSx = pixel.sx
-  const baseSy = pixel.sy
+  // Choose strip origin inside the sampleable area (layout sample or cell).
+  const baseSx = cell.sx
+  const baseSy = cell.sy
   const maxSx = Math.max(0, fullWidth - width)
   const maxSy = Math.max(0, fullHeight - height)
 
   if (horizontalStrip) {
     const maxBand = Math.max(0, height - thickness)
     const bandY =
-      baseSy + Math.floor(pixelUnit(pixel, seed, 506) * (maxBand + 1))
+      baseSy + Math.floor(cellUnit(cell, seed, 506) * (maxBand + 1))
     const srcY = clampInt(bandY, 0, fullHeight - thickness)
     const srcX = clampInt(baseSx, 0, maxSx)
 
@@ -662,13 +662,13 @@ function applyStripFeedback(
 
     for (let r = 0; r < repeats; r++) {
       const destY =
-        pixel.y +
+        cell.y +
         Math.floor(((height - thickness) * r) / Math.max(1, repeats - 1))
       for (let row = 0; row < thickness; row++) {
         const y = destY + row
-        if (y < pixel.y || y >= pixel.y + height) continue
+        if (y < cell.y || y >= cell.y + height) continue
         const tmpRow = row * width
-        const dstRow = y * fullWidth + pixel.x
+        const dstRow = y * fullWidth + cell.x
         for (let col = 0; col < width; col++) {
           const tmp = (tmpRow + col) * 4
           const dst = (dstRow + col) * 4
@@ -682,7 +682,7 @@ function applyStripFeedback(
   } else {
     const maxBand = Math.max(0, width - thickness)
     const bandX =
-      baseSx + Math.floor(pixelUnit(pixel, seed, 507) * (maxBand + 1))
+      baseSx + Math.floor(cellUnit(cell, seed, 507) * (maxBand + 1))
     const srcX = clampInt(bandX, 0, fullWidth - thickness)
     const srcY = clampInt(baseSy, 0, maxSy)
 
@@ -702,14 +702,14 @@ function applyStripFeedback(
 
     for (let r = 0; r < repeats; r++) {
       const destX =
-        pixel.x +
+        cell.x +
         Math.floor(((width - thickness) * r) / Math.max(1, repeats - 1))
       for (let row = 0; row < height; row++) {
         const tmpRow = row * thickness
-        const dstRow = (pixel.y + row) * fullWidth + destX
+        const dstRow = (cell.y + row) * fullWidth + destX
         for (let col = 0; col < thickness; col++) {
           const x = destX + col
-          if (x < pixel.x || x >= pixel.x + width) continue
+          if (x < cell.x || x >= cell.x + width) continue
           const tmp = (tmpRow + col) * 4
           const dst = (dstRow + col) * 4
           data[dst] = scratch[tmp]
@@ -724,34 +724,34 @@ function applyStripFeedback(
 
 /**
  * Ensure displaced sample content is present when Vertical is off
- * (so later styles still have the intended source patch in the pixel).
+ * (so later styles still have the intended source patch in the cell).
  */
 function ensureBaseSample(
   data: Uint8ClampedArray,
   fullWidth: number,
-  pixel: CachedPixel
+  cell: CachedCell
 ) {
-  if (pixel.sx === pixel.x && pixel.sy === pixel.y) return
+  if (cell.sx === cell.x && cell.sy === cell.y) return
   copySampleRegionClean(
     data,
     fullWidth,
-    pixel.sx,
-    pixel.sy,
-    pixel.x,
-    pixel.y,
-    pixel.width,
-    pixel.height
+    cell.sx,
+    cell.sy,
+    cell.x,
+    cell.y,
+    cell.width,
+    cell.height
   )
 }
 
 /**
- * Apply all enabled smear styles to one ON pixel, in the fixed documented order.
+ * Apply all enabled smear styles to one ON cell, in the fixed documented order.
  */
 export function applySmearStyles(
   data: Uint8ClampedArray,
   fullWidth: number,
   fullHeight: number,
-  pixel: CachedPixel,
+  cell: CachedCell,
   settings: EffectSettings
 ) {
   const seed = settings.seed >>> 0
@@ -768,11 +768,11 @@ export function applySmearStyles(
       data,
       fullWidth,
       fullHeight,
-      pixel,
+      cell,
       vertical.amount
     )
-  } else if (anyOther || pixel.sx !== pixel.x || pixel.sy !== pixel.y) {
-    ensureBaseSample(data, fullWidth, pixel)
+  } else if (anyOther || cell.sx !== cell.x || cell.sy !== cell.y) {
+    ensureBaseSample(data, fullWidth, cell)
   }
 
   if (settings.smearHorizontal.enabled) {
@@ -780,7 +780,7 @@ export function applySmearStyles(
       data,
       fullWidth,
       fullHeight,
-      pixel,
+      cell,
       settings.smearHorizontal.amount,
       seed
     )
@@ -790,7 +790,7 @@ export function applySmearStyles(
       data,
       fullWidth,
       fullHeight,
-      pixel,
+      cell,
       settings.smearDiagonal.amount,
       seed
     )
@@ -800,7 +800,7 @@ export function applySmearStyles(
       data,
       fullWidth,
       fullHeight,
-      pixel,
+      cell,
       settings.smearDrift.amount,
       seed
     )
@@ -810,7 +810,7 @@ export function applySmearStyles(
       data,
       fullWidth,
       fullHeight,
-      pixel,
+      cell,
       settings.smearRecursive.amount
     )
   }
@@ -819,7 +819,7 @@ export function applySmearStyles(
       data,
       fullWidth,
       fullHeight,
-      pixel,
+      cell,
       settings.smearStrip.amount,
       seed
     )
