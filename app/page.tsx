@@ -15,6 +15,17 @@ import type {
 import { useAppWorkers } from "@/hooks/useAppWorkers"
 import { cn } from "@/lib/utils"
 
+const ALLOWED_IMAGE_TYPES = new Set([
+  "image/jpeg",
+  "image/png",
+  "image/webp",
+  "image/gif",
+])
+const MAX_UPLOAD_BYTES = 40 * 1024 * 1024
+/** Reject pathological decode sizes before they enter the worker pipeline. */
+const MAX_DECODE_EDGE = 8192
+const MAX_DECODE_PIXELS = 36_000_000
+
 function sliderValue(value: number | readonly number[], fallback = 0) {
   const raw = Array.isArray(value) ? value[0] : value
   const n = typeof raw === "number" ? raw : Number(raw)
@@ -25,17 +36,34 @@ function defaultSmear(enabled: boolean, amount = 50): SmearStyleSettings {
   return { enabled, amount }
 }
 
-function fitCanvasDisplay(canvas: HTMLCanvasElement) {
+function isAllowedImageFile(file: File) {
+  return ALLOWED_IMAGE_TYPES.has(file.type)
+}
+
+/** Fit canvas CSS size to the preview pane (ResizeObserver target), with window fallback. */
+function fitCanvasToPane(
+  canvas: HTMLCanvasElement,
+  pane: HTMLElement | null
+) {
   if (canvas.width < 1 || canvas.height < 1) return
 
-  // Stacked layout below md (768px): sticky output pane (~45vh) above controls
-  const stacked = window.innerWidth < 768
-  const maxWidth = stacked
-    ? Math.max(200, window.innerWidth - 32)
-    : Math.max(320, Math.min(1200, window.innerWidth - 380))
-  const maxHeight = stacked
-    ? Math.max(140, window.innerHeight * 0.38)
-    : Math.max(240, Math.min(window.innerHeight * 0.8, window.innerHeight - 160))
+  let maxWidth: number
+  let maxHeight: number
+
+  if (pane && pane.clientWidth > 0 && pane.clientHeight > 0) {
+    maxWidth = Math.max(40, pane.clientWidth)
+    maxHeight = Math.max(40, pane.clientHeight)
+  } else {
+    // Fallback before the pane mounts or while layout is settling.
+    const stacked = window.innerWidth < 768
+    const viewportHeight = window.visualViewport?.height ?? window.innerHeight
+    maxWidth = stacked
+      ? Math.max(200, window.innerWidth - 32)
+      : Math.max(320, Math.min(1200, window.innerWidth - 380))
+    maxHeight = stacked
+      ? Math.max(140, viewportHeight * 0.38)
+      : Math.max(240, Math.min(viewportHeight * 0.8, viewportHeight - 160))
+  }
 
   const scale = Math.min(1, maxWidth / canvas.width, maxHeight / canvas.height)
   canvas.style.width = `${Math.round(canvas.width * scale)}px`
@@ -46,7 +74,8 @@ function prepareCanvasPreview(
   canvas: HTMLCanvasElement,
   source: CanvasImageSource,
   width: number,
-  height: number
+  height: number,
+  pane: HTMLElement | null
 ) {
   canvas.width = width
   canvas.height = height
@@ -54,33 +83,30 @@ function prepareCanvasPreview(
   if (ctx) {
     ctx.drawImage(source, 0, 0, width, height)
   }
-  fitCanvasDisplay(canvas)
-}
-
-function randomSeed() {
-  return Math.floor(10000 + Math.random() * 90000)
+  fitCanvasToPane(canvas, pane)
 }
 
 export default function Home() {
-  const [imageSrc, setImageSrc] = useState<string | null>(null)
-  const [seed, setSeed] = useState(randomSeed)
+  const [imageSrc, setImageSrc] = useState<string | null>(
+    "/images/Portrait_01.webp"
+  )
+  const [seed, setSeed] = useState(20599)
   const [isDragging, setIsDragging] = useState(false)
   const [randomSample, setRandomSample] = useState(false)
-  const [smearVertical, setSmearVertical] = useState(() => defaultSmear(false, 50))
+  const [edgeClamp, setEdgeClamp] = useState(false)
+  const [smearVertical, setSmearVertical] = useState(() => defaultSmear(false, 0))
   const [smearHorizontal, setSmearHorizontal] = useState(() =>
-    defaultSmear(false, 50)
+    defaultSmear(true, 4)
   )
-  const [smearDiagonal, setSmearDiagonal] = useState(() => defaultSmear(false, 50))
-  const [smearDrift, setSmearDrift] = useState(() => defaultSmear(false, 50))
+  const [smearDiagonal, setSmearDiagonal] = useState(() => defaultSmear(false, 0))
   const [smearRecursive, setSmearRecursive] = useState(() =>
-    defaultSmear(false, 50)
+    defaultSmear(true, 20)
   )
-  const [smearStrip, setSmearStrip] = useState(() => defaultSmear(false, 50))
   const [noiseScale, setNoiseScale] = useState(19)
   const [noiseSpread, setNoiseSpread] = useState(50)
   const [maxCellSize, setMaxCellSize] = useState(20)
-  const [layoutMode, setLayoutMode] = useState<LayoutMode>("standard")
-  const [subdivisionLoops, setSubdivisionLoops] = useState(3)
+  const [layoutMode, setLayoutMode] = useState<LayoutMode>("subdivision")
+  const [subdivisionLoops, setSubdivisionLoops] = useState(4)
   const [subdivisionMode, setSubdivisionMode] =
     useState<SubdivisionMode>("frontier")
   const [subdivisionRate, setSubdivisionRate] = useState(60)
@@ -89,12 +115,13 @@ export default function Home() {
   const [textureEnabled, setTextureEnabled] = useState(true)
   const [textureOpacity, setTextureOpacity] = useState(1)
   const [weightDither, setWeightDither] = useState(0)
-  const [weightInvert, setWeightInvert] = useState(25)
-  const [weightSurreal, setWeightSurreal] = useState(25)
+  const [weightInvert, setWeightInvert] = useState(30)
+  const [weightSurreal, setWeightSurreal] = useState(20)
   const [weightPixelate, setWeightPixelate] = useState(0)
   const [weightOriginal, setWeightOriginal] = useState(25)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const liveCanvasRef = useRef<HTMLCanvasElement>(null)
+  const previewPaneRef = useRef<HTMLDivElement>(null)
 
   const effectSettings: EffectSettings = {
     seed,
@@ -104,12 +131,11 @@ export default function Home() {
     weightPixelate,
     weightOriginal,
     randomSample,
+    edgeClamp,
     smearVertical,
     smearHorizontal,
     smearDiagonal,
-    smearDrift,
     smearRecursive,
-    smearStrip,
     noiseScale,
     noiseSpread,
     maxCellSize,
@@ -130,7 +156,13 @@ export default function Home() {
         bitmap.close()
         return
       }
-      prepareCanvasPreview(canvas, bitmap, width, height)
+      prepareCanvasPreview(
+        canvas,
+        bitmap,
+        width,
+        height,
+        previewPaneRef.current
+      )
     },
     []
   )
@@ -139,7 +171,13 @@ export default function Home() {
     (width: number, height: number, bitmap: ImageBitmap) => {
       const canvas = liveCanvasRef.current
       if (!canvas) return
-      prepareCanvasPreview(canvas, bitmap, width, height)
+      prepareCanvasPreview(
+        canvas,
+        bitmap,
+        width,
+        height,
+        previewPaneRef.current
+      )
     },
     []
   )
@@ -152,19 +190,37 @@ export default function Home() {
   })
 
   function processFile(file: File) {
-    if (!file.type.startsWith("image/")) return
-    // Cap uploads to keep worker memory reasonable (~40MB binary ≈ large photo).
-    if (file.size > 40 * 1024 * 1024) {
+    if (!isAllowedImageFile(file)) {
+      alert("Please upload a JPEG, PNG, WebP, or GIF image.")
+      return
+    }
+    if (file.size > MAX_UPLOAD_BYTES) {
       alert("File is too large. Please upload an image under 40MB.")
       return
     }
-    const reader = new FileReader()
-    reader.onload = () => {
-      if (typeof reader.result === "string") {
-        setImageSrc(reader.result)
+
+    void (async () => {
+      try {
+        const probe = await createImageBitmap(file)
+        const edge = Math.max(probe.width, probe.height)
+        const pixels = probe.width * probe.height
+        probe.close()
+        if (edge > MAX_DECODE_EDGE || pixels > MAX_DECODE_PIXELS) {
+          alert(
+            "Image dimensions are too large. Please use an image under 8192px on the long edge."
+          )
+          return
+        }
+
+        const url = URL.createObjectURL(file)
+        setImageSrc((prev) => {
+          if (prev?.startsWith("blob:")) URL.revokeObjectURL(prev)
+          return url
+        })
+      } catch {
+        alert("Could not read that image. Please try another file.")
       }
-    }
-    reader.readAsDataURL(file)
+    })()
   }
 
   function handleShowNoiseMapChange(checked: boolean) {
@@ -178,18 +234,36 @@ export default function Home() {
   }
 
   useEffect(() => {
-    function handleResize() {
+    function refit() {
       const canvas = liveCanvasRef.current
       if (canvas && canvas.width > 0) {
-        fitCanvasDisplay(canvas)
+        fitCanvasToPane(canvas, previewPaneRef.current)
       }
     }
 
-    window.addEventListener("resize", handleResize)
-    return () => {
-      window.removeEventListener("resize", handleResize)
+    const pane = previewPaneRef.current
+    let observer: ResizeObserver | null = null
+    if (pane && typeof ResizeObserver !== "undefined") {
+      observer = new ResizeObserver(() => refit())
+      observer.observe(pane)
     }
-  }, [])
+
+    window.addEventListener("resize", refit)
+    window.visualViewport?.addEventListener("resize", refit)
+    refit()
+
+    return () => {
+      observer?.disconnect()
+      window.removeEventListener("resize", refit)
+      window.visualViewport?.removeEventListener("resize", refit)
+    }
+  }, [imageSrc])
+
+  useEffect(() => {
+    return () => {
+      if (imageSrc?.startsWith("blob:")) URL.revokeObjectURL(imageSrc)
+    }
+  }, [imageSrc])
 
   function handleFileChange(event: React.ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0]
@@ -221,7 +295,7 @@ export default function Home() {
     setIsDragging(false)
 
     const file = event.dataTransfer.files[0]
-    if (!file || !file.type.startsWith("image/")) return
+    if (!file || !isAllowedImageFile(file)) return
     processFile(file)
   }
 
@@ -237,6 +311,11 @@ export default function Home() {
   const footerText = "font-footer text-xs text-slate-500"
   const footerLink =
     "font-footer text-slate-400 transition-colors hover:text-slate-300"
+  const sliderRow = "flex items-center gap-3"
+  const sliderValueReadout = cn(
+    footerText,
+    "w-8 shrink-0 text-right tabular-nums"
+  )
 
   return (
     <div className="flex h-dvh flex-col overflow-hidden bg-[radial-gradient(ellipse_at_top_left,_var(--tw-gradient-stops))] from-slate-900 via-[#08080a] to-black font-body text-[#f5f5f7] md:h-screen">
@@ -244,11 +323,11 @@ export default function Home() {
         <header className="order-0 flex shrink-0 items-center px-4 py-3 md:hidden">
           <h1 className={pageTitle}>Pixel By Day</h1>
         </header>
-        <aside className="order-2 flex min-h-0 w-full flex-1 flex-col gap-4 overflow-x-hidden overflow-y-auto border-none bg-transparent p-4 pb-6 md:order-1 md:h-full md:w-80 md:flex-none md:shrink-0 md:gap-6 md:overflow-y-auto md:p-6 md:pb-8">
+        <aside className="order-2 flex min-h-0 w-full flex-1 flex-col gap-4 overflow-x-hidden overflow-y-auto border-none bg-transparent p-4 pb-[max(1.5rem,env(safe-area-inset-bottom))] md:order-1 md:h-full md:w-80 md:flex-none md:shrink-0 md:gap-6 md:overflow-y-auto md:p-6 md:pb-8">
         <input
           ref={fileInputRef}
           type="file"
-          accept="image/*"
+          accept="image/jpeg,image/png,image/webp,image/gif"
           className="hidden"
           onChange={handleFileChange}
         />
@@ -315,16 +394,22 @@ export default function Home() {
                   Max Cell Size
                 </label>
               </div>
-              <Slider
-                id="max-cell-size"
-                value={[maxCellSize]}
-                min={1}
-                max={20}
-                step={1}
-                onValueChange={(value) =>
-                  setMaxCellSize(sliderValue(value, 1))
-                }
-              />
+              <div className={sliderRow}>
+                <Slider
+                  id="max-cell-size"
+                  className="min-w-0 flex-1"
+                  value={[maxCellSize]}
+                  min={1}
+                  max={20}
+                  step={1}
+                  onValueChange={(value) =>
+                    setMaxCellSize(sliderValue(value, 1))
+                  }
+                />
+                <span className={sliderValueReadout} aria-hidden="true">
+                  {maxCellSize}
+                </span>
+              </div>
             </div>
           )}
 
@@ -370,16 +455,22 @@ export default function Home() {
                     Passes
                   </label>
                 </div>
-                <Slider
-                  id="subdivision-loops"
-                  value={[subdivisionLoops]}
-                  min={1}
-                  max={7}
-                  step={1}
-                  onValueChange={(value) =>
-                    setSubdivisionLoops(sliderValue(value, 3))
-                  }
-                />
+                <div className={sliderRow}>
+                  <Slider
+                    id="subdivision-loops"
+                    className="min-w-0 flex-1"
+                    value={[subdivisionLoops]}
+                    min={1}
+                    max={7}
+                    step={1}
+                    onValueChange={(value) =>
+                      setSubdivisionLoops(sliderValue(value, 4))
+                    }
+                  />
+                  <span className={sliderValueReadout} aria-hidden="true">
+                    {subdivisionLoops}
+                  </span>
+                </div>
               </div>
 
               <div className="flex flex-col gap-3">
@@ -388,16 +479,22 @@ export default function Home() {
                     Rate
                   </label>
                 </div>
-                <Slider
-                  id="subdivision-rate"
-                  value={[subdivisionRate]}
-                  min={10}
-                  max={100}
-                  step={1}
-                  onValueChange={(value) =>
-                    setSubdivisionRate(sliderValue(value, 60))
-                  }
-                />
+                <div className={sliderRow}>
+                  <Slider
+                    id="subdivision-rate"
+                    className="min-w-0 flex-1"
+                    value={[subdivisionRate]}
+                    min={10}
+                    max={100}
+                    step={1}
+                    onValueChange={(value) =>
+                      setSubdivisionRate(sliderValue(value, 60))
+                    }
+                  />
+                  <span className={sliderValueReadout} aria-hidden="true">
+                    {subdivisionRate}
+                  </span>
+                </div>
               </div>
             </>
           )}
@@ -429,14 +526,20 @@ export default function Home() {
                 Noise Scale
               </label>
             </div>
-            <Slider
+            <div className={sliderRow}>
+              <Slider
                 id="noise-scale"
-              value={[noiseScale]}
-              min={1}
-              max={100}
-              step={1}
-              onValueChange={(value) => setNoiseScale(sliderValue(value, 19))}
-            />
+                className="min-w-0 flex-1"
+                value={[noiseScale]}
+                min={1}
+                max={100}
+                step={1}
+                onValueChange={(value) => setNoiseScale(sliderValue(value, 19))}
+              />
+              <span className={sliderValueReadout} aria-hidden="true">
+                {noiseScale}
+              </span>
+            </div>
           </div>
 
           <div className="flex flex-col gap-3">
@@ -445,14 +548,20 @@ export default function Home() {
                 Noise Spread
               </label>
             </div>
-            <Slider
+            <div className={sliderRow}>
+              <Slider
                 id="noise-spread"
-              value={[noiseSpread]}
-              min={0}
-              max={100}
-              step={1}
-              onValueChange={(value) => setNoiseSpread(sliderValue(value, 50))}
-            />
+                className="min-w-0 flex-1"
+                value={[noiseSpread]}
+                min={0}
+                max={100}
+                step={1}
+                onValueChange={(value) => setNoiseSpread(sliderValue(value, 50))}
+              />
+              <span className={sliderValueReadout} aria-hidden="true">
+                {noiseSpread}
+              </span>
+            </div>
           </div>
         </CollapsibleCallout>
 
@@ -488,14 +597,20 @@ export default function Home() {
                   Pixelate
                 </label>
               </div>
-              <Slider
-                id="weight-pixelate"
-                value={[weightPixelate]}
-                min={0}
-                max={100}
-                step={1}
-                onValueChange={(value) => setWeightPixelate(sliderValue(value))}
-              />
+              <div className={sliderRow}>
+                <Slider
+                  id="weight-pixelate"
+                  className="min-w-0 flex-1"
+                  value={[weightPixelate]}
+                  min={0}
+                  max={100}
+                  step={1}
+                  onValueChange={(value) => setWeightPixelate(sliderValue(value))}
+                />
+                <span className={sliderValueReadout} aria-hidden="true">
+                  {weightPixelate}
+                </span>
+              </div>
             </div>
 
             <div className="flex flex-col gap-3">
@@ -504,14 +619,20 @@ export default function Home() {
                   Invert
                 </label>
               </div>
-              <Slider
-                id="weight-invert"
-                value={[weightInvert]}
-                min={0}
-                max={100}
-                step={1}
-                onValueChange={(value) => setWeightInvert(sliderValue(value, 25))}
-              />
+              <div className={sliderRow}>
+                <Slider
+                  id="weight-invert"
+                  className="min-w-0 flex-1"
+                  value={[weightInvert]}
+                  min={0}
+                  max={100}
+                  step={1}
+                  onValueChange={(value) => setWeightInvert(sliderValue(value, 30))}
+                />
+                <span className={sliderValueReadout} aria-hidden="true">
+                  {weightInvert}
+                </span>
+              </div>
             </div>
 
             <div className="flex flex-col gap-3">
@@ -520,14 +641,20 @@ export default function Home() {
                   Surreal
                 </label>
               </div>
-              <Slider
-                id="weight-surreal"
-                value={[weightSurreal]}
-                min={0}
-                max={100}
-                step={1}
-                onValueChange={(value) => setWeightSurreal(sliderValue(value, 25))}
-              />
+              <div className={sliderRow}>
+                <Slider
+                  id="weight-surreal"
+                  className="min-w-0 flex-1"
+                  value={[weightSurreal]}
+                  min={0}
+                  max={100}
+                  step={1}
+                  onValueChange={(value) => setWeightSurreal(sliderValue(value, 20))}
+                />
+                <span className={sliderValueReadout} aria-hidden="true">
+                  {weightSurreal}
+                </span>
+              </div>
             </div>
 
             <div className="flex flex-col gap-3">
@@ -536,14 +663,20 @@ export default function Home() {
                   Dither
                 </label>
               </div>
-              <Slider
-                id="weight-dither"
-                value={[weightDither]}
-                min={0}
-                max={100}
-                step={1}
-                onValueChange={(value) => setWeightDither(sliderValue(value))}
-              />
+              <div className={sliderRow}>
+                <Slider
+                  id="weight-dither"
+                  className="min-w-0 flex-1"
+                  value={[weightDither]}
+                  min={0}
+                  max={100}
+                  step={1}
+                  onValueChange={(value) => setWeightDither(sliderValue(value))}
+                />
+                <span className={sliderValueReadout} aria-hidden="true">
+                  {weightDither}
+                </span>
+              </div>
             </div>
 
             <div className="flex flex-col gap-3">
@@ -552,30 +685,46 @@ export default function Home() {
                   Original
                 </label>
               </div>
-              <Slider
-                id="weight-original"
-                value={[weightOriginal]}
-                min={0}
-                max={100}
-                step={1}
-                onValueChange={(value) => setWeightOriginal(sliderValue(value, 25))}
-              />
+              <div className={sliderRow}>
+                <Slider
+                  id="weight-original"
+                  className="min-w-0 flex-1"
+                  value={[weightOriginal]}
+                  min={0}
+                  max={100}
+                  step={1}
+                  onValueChange={(value) => setWeightOriginal(sliderValue(value, 25))}
+                />
+                <span className={sliderValueReadout} aria-hidden="true">
+                  {weightOriginal}
+                </span>
+              </div>
             </div>
         </CollapsibleCallout>
 
         <CollapsibleCallout
-          title="Smear Styles"
+          title="Smear"
           className={floatingCard}
           titleClassName={sectionTitle}
           enabled={
             smearVertical.enabled ||
             smearHorizontal.enabled ||
             smearDiagonal.enabled ||
-            smearDrift.enabled ||
-            smearRecursive.enabled ||
-            smearStrip.enabled
+            smearRecursive.enabled
           }
         >
+          <div className="flex items-center justify-between gap-4 border-b border-white/5 pb-4">
+            <div className="flex items-center gap-1.5">
+              <label htmlFor="edge-clamp" className={controlLabel}>
+                Edge Clamp
+              </label>
+            </div>
+            <Switch
+              id="edge-clamp"
+              checked={edgeClamp}
+              onCheckedChange={setEdgeClamp}
+            />
+          </div>
           {(
             [
               {
@@ -597,22 +746,10 @@ export default function Home() {
                 set: setSmearDiagonal,
               },
               {
-                id: "drift",
-                label: "Drift",
-                value: smearDrift,
-                set: setSmearDrift,
-              },
-              {
                 id: "recursive",
                 label: "Recursive",
                 value: smearRecursive,
                 set: setSmearRecursive,
-              },
-              {
-                id: "strip",
-                label: "Strip Feedback",
-                value: smearStrip,
-                set: setSmearStrip,
               },
             ] as const
           ).map((style) => (
@@ -635,20 +772,26 @@ export default function Home() {
                 <label htmlFor={`smear-${style.id}-amount`} className={helperText}>
                   Amount
                 </label>
-                <Slider
-                id={`smear-${style.id}-amount`}
-                  value={[style.value.amount]}
-                  min={0}
-                  max={100}
-                  step={1}
-                  disabled={!style.value.enabled}
-                  onValueChange={(value) =>
-                    style.set({
-                      ...style.value,
-                      amount: sliderValue(value, 50),
-                    })
-                  }
-                />
+                <div className={sliderRow}>
+                  <Slider
+                    id={`smear-${style.id}-amount`}
+                    className="min-w-0 flex-1"
+                    value={[style.value.amount]}
+                    min={0}
+                    max={100}
+                    step={1}
+                    disabled={!style.value.enabled}
+                    onValueChange={(value) =>
+                      style.set({
+                        ...style.value,
+                        amount: sliderValue(value, 50),
+                      })
+                    }
+                  />
+                  <span className={sliderValueReadout} aria-hidden="true">
+                    {style.value.amount}
+                  </span>
+                </div>
               </div>
             </div>
           ))}
@@ -680,16 +823,22 @@ export default function Home() {
                   Grain Opacity
                 </label>
               </div>
-              <Slider
-                id="texture-opacity"
-                value={[textureOpacity]}
-                min={0}
-                max={1}
-                step={0.01}
-                onValueChange={(value) =>
-                  setTextureOpacity(sliderValue(value, 1))
-                }
-              />
+              <div className={sliderRow}>
+                <Slider
+                  id="texture-opacity"
+                  className="min-w-0 flex-1"
+                  value={[textureOpacity]}
+                  min={0}
+                  max={1}
+                  step={0.01}
+                  onValueChange={(value) =>
+                    setTextureOpacity(sliderValue(value, 1))
+                  }
+                />
+                <span className={sliderValueReadout} aria-hidden="true">
+                  {Math.round(textureOpacity * 100)}
+                </span>
+              </div>
             </div>
           )}
         </CollapsibleCallout>
@@ -716,6 +865,7 @@ export default function Home() {
           <div className="relative flex min-h-0 w-full flex-1 touch-none items-center justify-center overflow-hidden p-2 text-slate-500 sm:p-4 md:p-6">
             {imageSrc ? (
               <div
+                ref={previewPaneRef}
                 className="flex h-full max-h-full w-full max-w-[1200px] touch-none items-center justify-center overflow-hidden md:max-h-[80vh]"
                 style={{ touchAction: "none" }}
               >

@@ -7,7 +7,8 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "verify:phase1": "npx tsx scripts/verify-phase1-floor.ts"
+    "verify:phase1": "npx tsx scripts/verify-phase1-floor.ts",
+    "verify:smear": "npx tsx scripts/verify-smear-stack.ts"
   },
   "dependencies": {
     "@base-ui/react": "^1.7.0",

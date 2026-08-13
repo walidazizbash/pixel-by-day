@@ -11,6 +11,7 @@ import type {
   CompositeWorkerInMessage,
   CompositeWorkerOutMessage,
 } from "@/lib/effect-types"
+import { sanitizeCompositeTextureSettings } from "@/lib/validate-settings"
 
 const GRAIN_TEXTURE_URL = "/images/35mm_texture.png"
 
@@ -161,7 +162,23 @@ self.onmessage = (event: MessageEvent<CompositeWorkerInMessage>) => {
   if (!msg || typeof msg !== "object" || typeof msg.type !== "string") return
 
   if (msg.type === "composite") {
-    if (typeof msg.jobId !== "number" || !msg.source || !msg.settings) return
+    if (
+      typeof msg.jobId !== "number" ||
+      !Number.isFinite(msg.jobId) ||
+      !(msg.source instanceof ImageBitmap)
+    ) {
+      return
+    }
+    const settings = sanitizeCompositeTextureSettings(msg.settings)
+    if (!settings) {
+      msg.source.close()
+      post({
+        type: "error",
+        jobId: msg.jobId,
+        message: "Invalid composite settings",
+      })
+      return
+    }
     activeJobId = msg.jobId
 
     void (async () => {
@@ -172,7 +189,7 @@ self.onmessage = (event: MessageEvent<CompositeWorkerInMessage>) => {
           return
         }
 
-        if (!msg.settings.textureEnabled) {
+        if (!settings.textureEnabled) {
           post(
             {
               type: "result",
@@ -186,7 +203,7 @@ self.onmessage = (event: MessageEvent<CompositeWorkerInMessage>) => {
           return
         }
 
-        const bitmap = await applyPhase3Grain(msg.source, msg.settings)
+        const bitmap = await applyPhase3Grain(msg.source, settings)
         msg.source.close()
 
         if (isStale(msg.jobId)) {
@@ -219,7 +236,13 @@ self.onmessage = (event: MessageEvent<CompositeWorkerInMessage>) => {
   }
 
   if (msg.type === "EXPORT") {
-    if (!msg.source || !msg.settings) return
-    void exportComposite(msg.source, msg.settings)
+    if (!(msg.source instanceof ImageBitmap)) return
+    const settings = sanitizeCompositeTextureSettings(msg.settings)
+    if (!settings) {
+      msg.source.close()
+      post({ type: "EXPORT_ERROR", message: "Invalid export settings" })
+      return
+    }
+    void exportComposite(msg.source, settings)
   }
 }

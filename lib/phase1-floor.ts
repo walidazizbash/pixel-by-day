@@ -16,7 +16,7 @@ import type {
 } from "@/lib/effect-types"
 
 /** Bump when layout / composite semantics change. */
-export const LAYOUT_CACHE_VERSION = 22
+const LAYOUT_CACHE_VERSION = 22
 
 /**
  * Structural floor minimum in Cell size units (grid spans).
@@ -549,7 +549,7 @@ export function packSquareFloor(
   return cells
 }
 
-export function buildLayoutFromFloor(
+function buildLayoutFromFloor(
   raw: FloorSquare[],
   settings: EffectSettings,
   imageWidth: number,

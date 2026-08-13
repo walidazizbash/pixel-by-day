@@ -36,13 +36,18 @@ export type EffectSettings = {
   weightOriginal: number
   /** When true, each Cell samples a random source region; when false, samples its own geometry. */
   randomSample: boolean
+  /**
+   * When true: stacking-safe snapshot smear (freeze Cell, identity sx/sy,
+   * out-of-bounds samples clamp to the Cell edge).
+   * When false: legacy wet-canvas cascade (live-buffer feedback + amount-driven
+   * source shift).
+   */
+  edgeClamp: boolean
   /** Vertical overlapping-blit smear (preserves original Smear Amount look). */
   smearVertical: SmearStyleSettings
   smearHorizontal: SmearStyleSettings
   smearDiagonal: SmearStyleSettings
-  smearDrift: SmearStyleSettings
   smearRecursive: SmearStyleSettings
-  smearStrip: SmearStyleSettings
   /** UI 1–100 noise frequency; worker maps to internal 0.01–0.5. */
   noiseScale: number
   /** UI 0–100: how much of the grid receives effects (50 = balanced). */

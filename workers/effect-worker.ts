@@ -16,6 +16,7 @@ import {
   layoutParamsEqual,
 } from "@/lib/phase1-floor"
 import { applySmearStyles } from "@/lib/smear-styles"
+import { sanitizeEffectSettings } from "@/lib/validate-settings"
 
 const DITHER_SCALE = 2
 const PIXELATE_SIZE = 4
@@ -448,7 +449,6 @@ function drawNormalEffects(
   const sourcePixels = new Uint8ClampedArray(data)
   const cells = layout.cells
   const baseCellSize = layout.baseCellSize
-  const randomSample = settings.randomSample
 
   for (let i = 0; i < cells.length; i++) {
     const cell = cells[i]
@@ -466,6 +466,7 @@ function drawNormalEffects(
     )
 
     // 2) Continuous mapping of the full Cell window from the locked origin.
+    //    Exactly once per Cell — smears must not re-read this clean snapshot.
     copyContinuousCellSample(
       sourcePixels,
       data,
@@ -478,14 +479,21 @@ function drawNormalEffects(
       cell.height
     )
 
-    // Smears operate on the already-sampled Cell in place. When randomSample
-    // is on, force identity sx/sy so smear paths do not re-read a (possibly
-    // overwritten) random region from the work buffer.
-    const smearCell =
-      randomSample && (sampleX !== cell.x || sampleY !== cell.y)
-        ? { ...cell, sx: cell.x, sy: cell.y }
-        : cell
-
+    // 3) Smears on the Cell's work-buffer pixels.
+    //    Edge Clamp on: identity sx/sy (stacking-safe snapshot engine).
+    //    Edge Clamp off: keep layout sx/sy for amount-driven wet-canvas shift
+    //    (except randomSample, which must not re-read a foreign region).
+    let smearCell: CachedCell
+    if (settings.edgeClamp) {
+      smearCell = { ...cell, sx: cell.x, sy: cell.y }
+    } else if (
+      settings.randomSample &&
+      (sampleX !== cell.x || sampleY !== cell.y)
+    ) {
+      smearCell = { ...cell, sx: cell.x, sy: cell.y }
+    } else {
+      smearCell = cell
+    }
     applySmearStyles(data, width, height, smearCell, settings)
     const effect = chooseEffect(cell.randomVal, settings)
     if (effect !== "original") {
@@ -732,17 +740,30 @@ self.onmessage = (event: MessageEvent<EffectWorkerInMessage>) => {
   }
 
   if (msg.type === "render") {
-    if (typeof msg.jobId !== "number" || !msg.settings) return
+    if (typeof msg.jobId !== "number" || !Number.isFinite(msg.jobId)) return
+    const settings = sanitizeEffectSettings(msg.settings)
+    if (!settings) {
+      post({
+        type: "error",
+        jobId: msg.jobId,
+        message: "Invalid effect settings",
+      })
+      return
+    }
     activeJobId = msg.jobId
-    queuedRender = { jobId: msg.jobId, settings: msg.settings }
+    queuedRender = { jobId: msg.jobId, settings }
     pumpRenders()
     return
   }
 
   if (msg.type === "EXPORT") {
-    if (!msg.settings) return
+    const settings = sanitizeEffectSettings(msg.settings)
+    if (!settings) {
+      post({ type: "EXPORT_ERROR", message: "Invalid export settings" })
+      return
+    }
     const exportBitmap =
       msg.bitmap instanceof ImageBitmap ? msg.bitmap : undefined
-    void exportComposite(msg.settings, exportBitmap)
+    void exportComposite(settings, exportBitmap)
   }
 }

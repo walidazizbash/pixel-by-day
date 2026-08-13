@@ -10,6 +10,11 @@ import type {
 
 /** Max edge length for interactive preview / Phase 2+3 worker buffers. */
 const MAX_PREVIEW_DIMENSION = 1200
+/** Max edge length for Save / high-res export (avoids mobile OOM). */
+const MAX_EXPORT_DIMENSION = 4096
+/** Hard reject for pathological source bitmaps. */
+const MAX_DECODE_EDGE = 8192
+const MAX_DECODE_PIXELS = 36_000_000
 
 function releaseBitmap(bitmap: ImageBitmap | null) {
   if (!bitmap) return
@@ -20,22 +25,25 @@ function releaseBitmap(bitmap: ImageBitmap | null) {
   }
 }
 
-function previewDimensions(width: number, height: number) {
-  const maxEdge = Math.max(width, height)
-  if (maxEdge <= MAX_PREVIEW_DIMENSION) {
+function fitMaxEdge(width: number, height: number, maxEdge: number) {
+  const edge = Math.max(width, height)
+  if (edge <= maxEdge) {
     return { width, height }
   }
-  const scale = MAX_PREVIEW_DIMENSION / maxEdge
+  const scale = maxEdge / edge
   return {
     width: Math.max(1, Math.round(width * scale)),
     height: Math.max(1, Math.round(height * scale)),
   }
 }
 
-async function createPreviewBitmap(source: ImageBitmap | HTMLImageElement) {
+async function createSizedBitmap(
+  source: ImageBitmap | HTMLImageElement,
+  maxEdge: number
+) {
   const width = "naturalWidth" in source ? source.naturalWidth : source.width
   const height = "naturalHeight" in source ? source.naturalHeight : source.height
-  const size = previewDimensions(width, height)
+  const size = fitMaxEdge(width, height, maxEdge)
   if (size.width === width && size.height === height) {
     return createImageBitmap(source)
   }
@@ -44,6 +52,14 @@ async function createPreviewBitmap(source: ImageBitmap | HTMLImageElement) {
     resizeHeight: size.height,
     resizeQuality: "high",
   })
+}
+
+async function createPreviewBitmap(source: ImageBitmap | HTMLImageElement) {
+  return createSizedBitmap(source, MAX_PREVIEW_DIMENSION)
+}
+
+async function createExportBitmap(source: ImageBitmap | HTMLImageElement) {
+  return createSizedBitmap(source, MAX_EXPORT_DIMENSION)
 }
 
 function downloadPngBlob(blob: Blob, filenamePrefix = "generated-mosaic") {
@@ -75,7 +91,7 @@ function textureSettingsFrom(
   }
 }
 
-export type UseAppWorkersOptions = {
+type UseAppWorkersOptions = {
   settings: EffectSettings
   imageSrc: string | null
   /** Draw a finished composite frame to the live canvas. */
@@ -84,7 +100,7 @@ export type UseAppWorkersOptions = {
   onSourcePreview?: (width: number, height: number, bitmap: ImageBitmap) => void
 }
 
-export type UseAppWorkersResult = {
+type UseAppWorkersResult = {
   isExportingPng: boolean
   exportHighResImage: () => void
 }
@@ -113,13 +129,14 @@ export function useAppWorkers({
   const phase2BitmapRef = useRef<ImageBitmap | null>(null)
 
   const settingsRef = useRef(settings)
-  settingsRef.current = settings
-
   const onPreviewFrameRef = useRef(onPreviewFrame)
-  onPreviewFrameRef.current = onPreviewFrame
-
   const onSourcePreviewRef = useRef(onSourcePreview)
-  onSourcePreviewRef.current = onSourcePreview
+
+  useEffect(() => {
+    settingsRef.current = settings
+    onPreviewFrameRef.current = onPreviewFrame
+    onSourcePreviewRef.current = onSourcePreview
+  }, [settings, onPreviewFrame, onSourcePreview])
 
   function applyWorkerResult(
     width: number,
@@ -259,7 +276,7 @@ export function useAppWorkers({
     setIsExportingPng(true)
     void (async () => {
       try {
-        const exportBitmap = await createImageBitmap(fullSource)
+        const exportBitmap = await createExportBitmap(fullSource)
         workerRef.current?.postMessage(
           {
             type: "EXPORT",
@@ -403,12 +420,11 @@ export function useAppWorkers({
     settings.weightPixelate,
     settings.weightOriginal,
     settings.randomSample,
+    settings.edgeClamp,
     settings.smearVertical,
     settings.smearHorizontal,
     settings.smearDiagonal,
-    settings.smearDrift,
     settings.smearRecursive,
-    settings.smearStrip,
     settings.showNoiseMap,
     settings.showCellLayout,
     scheduleRegen,
@@ -452,6 +468,20 @@ export function useAppWorkers({
     image.onload = async () => {
       if (cancelled) return
       try {
+        const edge = Math.max(image.naturalWidth, image.naturalHeight)
+        const pixels = image.naturalWidth * image.naturalHeight
+        if (
+          edge > MAX_DECODE_EDGE ||
+          pixels > MAX_DECODE_PIXELS ||
+          image.naturalWidth < 1 ||
+          image.naturalHeight < 1
+        ) {
+          console.error(
+            "[pixel-by-day] Source image exceeds safe decode limits"
+          )
+          return
+        }
+
         const fullBitmap = await createImageBitmap(image)
         if (cancelled) {
           fullBitmap.close()
