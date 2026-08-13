@@ -78,7 +78,12 @@ export type EffectWorkerInMessage =
   | { type: "setSource"; bitmap: ImageBitmap }
   | { type: "clearSource" }
   | { type: "render"; jobId: number; settings: EffectSettings }
-  | { type: "EXPORT"; settings: EffectSettings }
+  | {
+      type: "EXPORT"
+      settings: EffectSettings
+      /** Optional full-resolution source for export; preview may use a capped bitmap. */
+      bitmap?: ImageBitmap
+    }
 
 export type EffectWorkerOutMessage =
   | {

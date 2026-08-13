@@ -8,6 +8,9 @@ import type {
   EffectWorkerOutMessage,
 } from "@/lib/effect-types"
 
+/** Max edge length for interactive preview / Phase 2+3 worker buffers. */
+const MAX_PREVIEW_DIMENSION = 1200
+
 function releaseBitmap(bitmap: ImageBitmap | null) {
   if (!bitmap) return
   try {
@@ -15,6 +18,32 @@ function releaseBitmap(bitmap: ImageBitmap | null) {
   } catch {
     // already closed
   }
+}
+
+function previewDimensions(width: number, height: number) {
+  const maxEdge = Math.max(width, height)
+  if (maxEdge <= MAX_PREVIEW_DIMENSION) {
+    return { width, height }
+  }
+  const scale = MAX_PREVIEW_DIMENSION / maxEdge
+  return {
+    width: Math.max(1, Math.round(width * scale)),
+    height: Math.max(1, Math.round(height * scale)),
+  }
+}
+
+async function createPreviewBitmap(source: ImageBitmap | HTMLImageElement) {
+  const width = "naturalWidth" in source ? source.naturalWidth : source.width
+  const height = "naturalHeight" in source ? source.naturalHeight : source.height
+  const size = previewDimensions(width, height)
+  if (size.width === width && size.height === height) {
+    return createImageBitmap(source)
+  }
+  return createImageBitmap(source, {
+    resizeWidth: size.width,
+    resizeHeight: size.height,
+    resizeQuality: "high",
+  })
 }
 
 function downloadPngBlob(blob: Blob, filenamePrefix = "generated-mosaic") {
@@ -76,7 +105,10 @@ export function useAppWorkers({
   const pendingDispatchRef = useRef(false)
   const pendingPhase3Ref = useRef(false)
   const compositeBitmapRef = useRef<ImageBitmap | null>(null)
+  /** Capped preview source (what the effect worker uses for interactive renders). */
   const sourceBitmapRef = useRef<ImageBitmap | null>(null)
+  /** Full-resolution source — used only for Save / high-res export. */
+  const fullSourceBitmapRef = useRef<ImageBitmap | null>(null)
   /** Last finished Phase 2 frame — reused for texture-only Phase 3 updates. */
   const phase2BitmapRef = useRef<ImageBitmap | null>(null)
 
@@ -215,8 +247,9 @@ export function useAppWorkers({
 
   const exportHighResImage = useCallback(() => {
     const effectSettings = settingsRef.current
+    const fullSource = fullSourceBitmapRef.current
     if (
-      !sourceBitmapRef.current ||
+      !fullSource ||
       !workerRef.current ||
       isExportingPng ||
       !effectSettings
@@ -224,10 +257,22 @@ export function useAppWorkers({
       return
     }
     setIsExportingPng(true)
-    workerRef.current.postMessage({
-      type: "EXPORT",
-      settings: exportSettingsFrom(effectSettings),
-    })
+    void (async () => {
+      try {
+        const exportBitmap = await createImageBitmap(fullSource)
+        workerRef.current?.postMessage(
+          {
+            type: "EXPORT",
+            settings: exportSettingsFrom(effectSettings),
+            bitmap: exportBitmap,
+          },
+          [exportBitmap]
+        )
+      } catch (err) {
+        setIsExportingPng(false)
+        console.error("[pixel-by-day] Export prep failed", err)
+      }
+    })()
   }, [isExportingPng])
 
   useEffect(() => {
@@ -335,6 +380,8 @@ export function useAppWorkers({
       phase2BitmapRef.current = null
       releaseBitmap(sourceBitmapRef.current)
       sourceBitmapRef.current = null
+      releaseBitmap(fullSourceBitmapRef.current)
+      fullSourceBitmapRef.current = null
     }
   }, [dispatchComposite, handlePhase2Result])
 
@@ -383,6 +430,8 @@ export function useAppWorkers({
       workerRef.current?.postMessage({ type: "clearSource" })
       releaseBitmap(sourceBitmapRef.current)
       sourceBitmapRef.current = null
+      releaseBitmap(fullSourceBitmapRef.current)
+      fullSourceBitmapRef.current = null
       releaseBitmap(phase2BitmapRef.current)
       phase2BitmapRef.current = null
       releaseBitmap(compositeBitmapRef.current)
@@ -396,21 +445,34 @@ export function useAppWorkers({
     phase2BitmapRef.current = null
     releaseBitmap(sourceBitmapRef.current)
     sourceBitmapRef.current = null
+    releaseBitmap(fullSourceBitmapRef.current)
+    fullSourceBitmapRef.current = null
 
     const image = new Image()
     image.onload = async () => {
       if (cancelled) return
       try {
-        const bitmap = await createImageBitmap(image)
+        const fullBitmap = await createImageBitmap(image)
         if (cancelled) {
-          bitmap.close()
+          fullBitmap.close()
           return
         }
-        sourceBitmapRef.current = bitmap
+        fullSourceBitmapRef.current = fullBitmap
 
-        onSourcePreviewRef.current?.(bitmap.width, bitmap.height, bitmap)
+        const previewBitmap = await createPreviewBitmap(fullBitmap)
+        if (cancelled) {
+          previewBitmap.close()
+          return
+        }
+        sourceBitmapRef.current = previewBitmap
 
-        const workerBitmap = await createImageBitmap(bitmap)
+        onSourcePreviewRef.current?.(
+          previewBitmap.width,
+          previewBitmap.height,
+          previewBitmap
+        )
+
+        const workerBitmap = await createImageBitmap(previewBitmap)
         if (cancelled) {
           workerBitmap.close()
           return

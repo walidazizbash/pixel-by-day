@@ -372,6 +372,65 @@ function drawCellLayoutDebug(
   }
 }
 
+/**
+ * Lock the source sample origin once per Cell.
+ * - randomSample on: Phase 1's per-Cell sx/sy, clamped so width×height fits
+ * - randomSample off: identity map to the Cell's own geometry
+ */
+function resolveCellSampleOrigin(
+  cell: CachedCell,
+  settings: EffectSettings,
+  fullWidth: number,
+  fullHeight: number
+): { sampleX: number; sampleY: number } {
+  if (!settings.randomSample) {
+    return { sampleX: cell.x, sampleY: cell.y }
+  }
+
+  const maxSx = Math.max(0, fullWidth - cell.width)
+  const maxSy = Math.max(0, fullHeight - cell.height)
+  let sampleX = cell.sx | 0
+  let sampleY = cell.sy | 0
+  if (sampleX < 0) sampleX = 0
+  else if (sampleX > maxSx) sampleX = maxSx
+  if (sampleY < 0) sampleY = 0
+  else if (sampleY > maxSy) sampleY = maxSy
+  return { sampleX, sampleY }
+}
+
+/**
+ * Continuous pixel mapping: one unbroken source window → Cell destination.
+ * Reads from an immutable source snapshot so earlier Cells cannot pollute
+ * later random samples (work-buffer feedback was causing fragmentation).
+ */
+function copyContinuousCellSample(
+  source: Uint8ClampedArray,
+  dest: Uint8ClampedArray,
+  fullWidth: number,
+  sampleX: number,
+  sampleY: number,
+  destX: number,
+  destY: number,
+  cellWidth: number,
+  cellHeight: number
+) {
+  if (cellWidth < 1 || cellHeight < 1) return
+  if (sampleX === destX && sampleY === destY) return
+
+  for (let row = 0; row < cellHeight; row++) {
+    const srcRow = (sampleY + row) * fullWidth + sampleX
+    const dstRow = (destY + row) * fullWidth + destX
+    for (let col = 0; col < cellWidth; col++) {
+      const s = (srcRow + col) * 4
+      const d = (dstRow + col) * 4
+      dest[d] = source[s]
+      dest[d + 1] = source[s + 1]
+      dest[d + 2] = source[s + 2]
+      dest[d + 3] = source[s + 3]
+    }
+  }
+}
+
 /** Normal Phase 2 composite: source → mask → sample → effects. No debug visualization. */
 function drawNormalEffects(
   ctx: OffscreenCanvasRenderingContext2D,
@@ -384,8 +443,12 @@ function drawNormalEffects(
 
   const imageData = ctx.getImageData(0, 0, width, height)
   const data = imageData.data
+  // Immutable snapshot of the source pixels — Cell samples must never read
+  // from the mutable work buffer (other Cells may have already written there).
+  const sourcePixels = new Uint8ClampedArray(data)
   const cells = layout.cells
   const baseCellSize = layout.baseCellSize
+  const randomSample = settings.randomSample
 
   for (let i = 0; i < cells.length; i++) {
     const cell = cells[i]
@@ -394,7 +457,36 @@ function drawNormalEffects(
     // OFF cells leave the source background untouched.
     if (!mask.on) continue
 
-    applySmearStyles(data, width, height, cell, settings)
+    // 1) Lock sample origin once for this Cell (not per-pixel / sub-grid).
+    const { sampleX, sampleY } = resolveCellSampleOrigin(
+      cell,
+      settings,
+      width,
+      height
+    )
+
+    // 2) Continuous mapping of the full Cell window from the locked origin.
+    copyContinuousCellSample(
+      sourcePixels,
+      data,
+      width,
+      sampleX,
+      sampleY,
+      cell.x,
+      cell.y,
+      cell.width,
+      cell.height
+    )
+
+    // Smears operate on the already-sampled Cell in place. When randomSample
+    // is on, force identity sx/sy so smear paths do not re-read a (possibly
+    // overwritten) random region from the work buffer.
+    const smearCell =
+      randomSample && (sampleX !== cell.x || sampleY !== cell.y)
+        ? { ...cell, sx: cell.x, sy: cell.y }
+        : cell
+
+    applySmearStyles(data, width, height, smearCell, settings)
     const effect = chooseEffect(cell.randomVal, settings)
     if (effect !== "original") {
       applyEffectGlobal(
@@ -466,32 +558,63 @@ function resolveLayout(settings: EffectSettings, width: number, height: number) 
   return layout
 }
 
-async function exportComposite(settings: EffectSettings) {
-  if (!cachedSource) {
+async function exportComposite(
+  settings: EffectSettings,
+  sourceOverride?: ImageBitmap
+) {
+  const source = sourceOverride ?? cachedSource
+  if (!source) {
+    if (sourceOverride) {
+      try {
+        sourceOverride.close()
+      } catch {
+        // already closed
+      }
+    }
     post({ type: "EXPORT_ERROR", message: "No source image cached in worker" })
     return
   }
 
-  const width = cachedSource.width
-  const height = cachedSource.height
+  // Cancel in-flight preview work so a temporary source swap can't race renders.
+  activeJobId += 1
+  queuedRender = null
+
+  const width = source.width
+  const height = source.height
   // Always export the finished mosaic (never Visualize Noise / Cell Layout debug).
   const exportSettings: EffectSettings = {
     ...settings,
     showNoiseMap: false,
     showCellLayout: false,
   }
-  const layout = resolveLayout(exportSettings, width, height)
+
+  // Full-res override builds a one-off layout so the capped preview cache stays intact.
+  const layout = sourceOverride
+    ? generateLayout(exportSettings, width, height)
+    : resolveLayout(exportSettings, width, height)
 
   const canvas = new OffscreenCanvas(width, height)
   const ctx = canvas.getContext("2d", { willReadFrequently: true })
   if (!ctx) {
+    if (sourceOverride) {
+      try {
+        sourceOverride.close()
+      } catch {
+        // already closed
+      }
+    }
     post({ type: "EXPORT_ERROR", message: "Failed to create export canvas" })
     return
   }
 
-  drawComposite(ctx, layout, exportSettings, width, height)
+  // Temporarily point draw helpers at the export source without replacing preview cache.
+  const previousSource = cachedSource
+  if (sourceOverride) {
+    cachedSource = sourceOverride
+  }
 
   try {
+    drawComposite(ctx, layout, exportSettings, width, height)
     const blob = await canvas.convertToBlob({ type: "image/png" })
     post({ type: "EXPORT_COMPLETE", blob })
   } catch (err) {
@@ -499,6 +622,15 @@ async function exportComposite(settings: EffectSettings) {
       type: "EXPORT_ERROR",
       message: err instanceof Error ? err.message : "PNG export failed",
     })
+  } finally {
+    cachedSource = previousSource
+    if (sourceOverride) {
+      try {
+        sourceOverride.close()
+      } catch {
+        // already closed
+      }
+    }
   }
 }
 
@@ -609,6 +741,8 @@ self.onmessage = (event: MessageEvent<EffectWorkerInMessage>) => {
 
   if (msg.type === "EXPORT") {
     if (!msg.settings) return
-    void exportComposite(msg.settings)
+    const exportBitmap =
+      msg.bitmap instanceof ImageBitmap ? msg.bitmap : undefined
+    void exportComposite(msg.settings, exportBitmap)
   }
 }

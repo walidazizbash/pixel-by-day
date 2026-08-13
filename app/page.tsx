@@ -275,10 +275,10 @@ export default function Home() {
           </div>
 
           <div className="flex items-center justify-between gap-4">
-            <span className={controlLabel}>Layout Mode</span>
+            <span className={controlLabel}>Mode</span>
             <div
               role="group"
-              aria-label="Layout Mode"
+              aria-label="Mode"
               className="inline-flex rounded-lg border border-white/10 bg-slate-950/40 p-0.5"
             >
               {(
@@ -330,29 +330,11 @@ export default function Home() {
 
           {layoutMode === "subdivision" && (
             <>
-              <div className="flex flex-col gap-3">
-                <div className="flex items-center gap-1.5">
-                  <label htmlFor="subdivision-loops" className={controlLabel}>
-                    Subdivision Loops
-                  </label>
-                </div>
-                <Slider
-                  id="subdivision-loops"
-                  value={[subdivisionLoops]}
-                  min={1}
-                  max={7}
-                  step={1}
-                  onValueChange={(value) =>
-                    setSubdivisionLoops(sliderValue(value, 3))
-                  }
-                />
-              </div>
-
               <div className="flex items-center justify-between gap-4">
-                <span className={controlLabel}>Subdivision Mode</span>
+                <span className={controlLabel}>Type</span>
                 <div
                   role="group"
-                  aria-label="Subdivision Mode"
+                  aria-label="Type"
                   className="inline-flex rounded-lg border border-white/10 bg-slate-950/40 p-0.5"
                 >
                   {(
@@ -384,8 +366,26 @@ export default function Home() {
 
               <div className="flex flex-col gap-3">
                 <div className="flex items-center gap-1.5">
+                  <label htmlFor="subdivision-loops" className={controlLabel}>
+                    Passes
+                  </label>
+                </div>
+                <Slider
+                  id="subdivision-loops"
+                  value={[subdivisionLoops]}
+                  min={1}
+                  max={7}
+                  step={1}
+                  onValueChange={(value) =>
+                    setSubdivisionLoops(sliderValue(value, 3))
+                  }
+                />
+              </div>
+
+              <div className="flex flex-col gap-3">
+                <div className="flex items-center gap-1.5">
                   <label htmlFor="subdivision-rate" className={controlLabel}>
-                    Subdivision Rate
+                    Rate
                   </label>
                 </div>
                 <Slider
@@ -430,7 +430,7 @@ export default function Home() {
               </label>
             </div>
             <Slider
-              id="noise-scale"
+                id="noise-scale"
               value={[noiseScale]}
               min={1}
               max={100}
@@ -446,7 +446,7 @@ export default function Home() {
               </label>
             </div>
             <Slider
-              id="noise-spread"
+                id="noise-spread"
               value={[noiseSpread]}
               min={0}
               max={100}
@@ -454,97 +454,6 @@ export default function Home() {
               onValueChange={(value) => setNoiseSpread(sliderValue(value, 50))}
             />
           </div>
-        </CollapsibleCallout>
-
-        <CollapsibleCallout
-          title="Smear Styles"
-          className={floatingCard}
-          titleClassName={sectionTitle}
-          enabled={
-            smearVertical.enabled ||
-            smearHorizontal.enabled ||
-            smearDiagonal.enabled ||
-            smearDrift.enabled ||
-            smearRecursive.enabled ||
-            smearStrip.enabled
-          }
-        >
-          {(
-            [
-              {
-                id: "vertical",
-                label: "Vertical",
-                value: smearVertical,
-                set: setSmearVertical,
-              },
-              {
-                id: "horizontal",
-                label: "Horizontal",
-                value: smearHorizontal,
-                set: setSmearHorizontal,
-              },
-              {
-                id: "diagonal",
-                label: "Diagonal",
-                value: smearDiagonal,
-                set: setSmearDiagonal,
-              },
-              {
-                id: "drift",
-                label: "Drift",
-                value: smearDrift,
-                set: setSmearDrift,
-              },
-              {
-                id: "recursive",
-                label: "Recursive",
-                value: smearRecursive,
-                set: setSmearRecursive,
-              },
-              {
-                id: "strip",
-                label: "Strip Feedback",
-                value: smearStrip,
-                set: setSmearStrip,
-              },
-            ] as const
-          ).map((style) => (
-            <div key={style.id} className="flex flex-col gap-3 border-b border-white/5 pb-4 last:border-b-0 last:pb-0">
-              <div className="flex items-center justify-between gap-4">
-                <div className="flex items-center gap-1.5">
-                  <label htmlFor={`smear-${style.id}`} className={controlLabel}>
-                    {style.label}
-                  </label>
-                </div>
-                <Switch
-                  id={`smear-${style.id}`}
-                  checked={style.value.enabled}
-                  onCheckedChange={(checked) =>
-                    style.set({ ...style.value, enabled: checked })
-                  }
-                />
-              </div>
-              <div className="flex flex-col gap-2">
-                <label htmlFor={`smear-${style.id}-amount`} className={helperText}>
-                  Amount
-                </label>
-                <Slider
-                  id={`smear-${style.id}-amount`}
-                  value={[style.value.amount]}
-                  min={0}
-                  max={100}
-                  step={1}
-                  disabled={!style.value.enabled}
-                  onValueChange={(value) =>
-                    style.set({
-                      ...style.value,
-                      amount: sliderValue(value, 50),
-                    })
-                  }
-                />
-              </div>
-            </div>
-          ))}
         </CollapsibleCallout>
 
         <CollapsibleCallout
@@ -652,6 +561,97 @@ export default function Home() {
                 onValueChange={(value) => setWeightOriginal(sliderValue(value, 25))}
               />
             </div>
+        </CollapsibleCallout>
+
+        <CollapsibleCallout
+          title="Smear Styles"
+          className={floatingCard}
+          titleClassName={sectionTitle}
+          enabled={
+            smearVertical.enabled ||
+            smearHorizontal.enabled ||
+            smearDiagonal.enabled ||
+            smearDrift.enabled ||
+            smearRecursive.enabled ||
+            smearStrip.enabled
+          }
+        >
+          {(
+            [
+              {
+                id: "vertical",
+                label: "Vertical",
+                value: smearVertical,
+                set: setSmearVertical,
+              },
+              {
+                id: "horizontal",
+                label: "Horizontal",
+                value: smearHorizontal,
+                set: setSmearHorizontal,
+              },
+              {
+                id: "diagonal",
+                label: "Diagonal",
+                value: smearDiagonal,
+                set: setSmearDiagonal,
+              },
+              {
+                id: "drift",
+                label: "Drift",
+                value: smearDrift,
+                set: setSmearDrift,
+              },
+              {
+                id: "recursive",
+                label: "Recursive",
+                value: smearRecursive,
+                set: setSmearRecursive,
+              },
+              {
+                id: "strip",
+                label: "Strip Feedback",
+                value: smearStrip,
+                set: setSmearStrip,
+              },
+            ] as const
+          ).map((style) => (
+            <div key={style.id} className="flex flex-col gap-3 border-b border-white/5 pb-4 last:border-b-0 last:pb-0">
+              <div className="flex items-center justify-between gap-4">
+                <div className="flex items-center gap-1.5">
+                  <label htmlFor={`smear-${style.id}`} className={controlLabel}>
+                    {style.label}
+                  </label>
+                </div>
+                <Switch
+                  id={`smear-${style.id}`}
+                  checked={style.value.enabled}
+                  onCheckedChange={(checked) =>
+                    style.set({ ...style.value, enabled: checked })
+                  }
+                />
+              </div>
+              <div className="flex flex-col gap-2">
+                <label htmlFor={`smear-${style.id}-amount`} className={helperText}>
+                  Amount
+                </label>
+                <Slider
+                id={`smear-${style.id}-amount`}
+                  value={[style.value.amount]}
+                  min={0}
+                  max={100}
+                  step={1}
+                  disabled={!style.value.enabled}
+                  onValueChange={(value) =>
+                    style.set({
+                      ...style.value,
+                      amount: sliderValue(value, 50),
+                    })
+                  }
+                />
+              </div>
+            </div>
+          ))}
         </CollapsibleCallout>
 
         <CollapsibleCallout
