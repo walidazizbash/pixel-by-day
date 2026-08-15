@@ -438,7 +438,8 @@ function drawNormalEffects(
   layout: CachedLayout,
   settings: EffectSettings,
   width: number,
-  height: number
+  height: number,
+  decay: number
 ) {
   ctx.drawImage(cachedSource!, 0, 0, width, height)
 
@@ -494,7 +495,7 @@ function drawNormalEffects(
     } else {
       smearCell = cell
     }
-    applySmearStyles(data, width, height, smearCell, settings)
+    applySmearStyles(data, width, height, smearCell, settings, decay)
     const effect = chooseEffect(cell.randomVal, settings)
     if (effect !== "original") {
       applyEffectGlobal(
@@ -518,7 +519,8 @@ function drawComposite(
   layout: CachedLayout,
   settings: EffectSettings,
   width: number,
-  height: number
+  height: number,
+  decay = 1
 ) {
   if (settings.showCellLayout) {
     drawCellLayoutDebug(ctx, layout.cells, width, height)
@@ -530,17 +532,18 @@ function drawComposite(
     return
   }
 
-  drawNormalEffects(ctx, layout, settings, width, height)
+  drawNormalEffects(ctx, layout, settings, width, height, decay)
 }
 
 function compositeCells(
   layout: CachedLayout,
   settings: EffectSettings,
   width: number,
-  height: number
+  height: number,
+  decay = 1
 ): ImageBitmap {
   const ctx = ensureWorkSurface(width, height)
-  drawComposite(ctx, layout, settings, width, height)
+  drawComposite(ctx, layout, settings, width, height, decay)
 
   const bitmap = workCanvas!.transferToImageBitmap()
   // transferToImageBitmap detaches the canvas — recreate on next composite
@@ -549,6 +552,27 @@ function compositeCells(
   workWidth = 0
   workHeight = 0
   return bitmap
+}
+
+/** Phase 2 pass into ImageData without detaching the shared work canvas. */
+function renderPassToImageData(
+  layout: CachedLayout,
+  settings: EffectSettings,
+  width: number,
+  height: number,
+  decay: number
+): ImageData {
+  const ctx = ensureWorkSurface(width, height)
+  drawComposite(ctx, layout, settings, width, height, decay)
+  return ctx.getImageData(0, 0, width, height)
+}
+
+function bitmapFromImageData(imageData: ImageData): ImageBitmap {
+  const canvas = new OffscreenCanvas(imageData.width, imageData.height)
+  const ctx = canvas.getContext("2d")
+  if (!ctx) throw new Error("Failed to create ImageBitmap from ImageData")
+  ctx.putImageData(imageData, 0, 0)
+  return canvas.transferToImageBitmap()
 }
 
 function resolveLayout(settings: EffectSettings, width: number, height: number) {
@@ -564,6 +588,107 @@ function resolveLayout(settings: EffectSettings, width: number, height: number) 
   cachedLayout = layout
   cachedLayoutParams = layoutParams
   return layout
+}
+
+function clampPasses(value: number): number {
+  const n = Math.round(Number(value) || 1)
+  if (n < 1) return 1
+  if (n > 3) return 3
+  return n
+}
+
+/**
+ * Recursive Phase 1+2 solver: each pass feeds its output into the next.
+ * Phase 3 texture must NOT run here — the composite worker applies it once
+ * after this pipeline returns the final bitmap.
+ *
+ * Intermediate passes keep the shared work canvas (ImageData handoff) so we
+ * only transferToImageBitmap on the final pass.
+ */
+function runRecursivePasses(
+  settings: EffectSettings,
+  width: number,
+  height: number,
+  rootSource: ImageBitmap,
+  jobId?: number
+): ImageBitmap {
+  const passCount = clampPasses(settings.passes)
+  const previousSource = cachedSource
+  let current = rootSource
+  /** Intermediate bitmaps we own and must close (never the root source). */
+  let owned: ImageBitmap | null = null
+
+  try {
+    for (let i = 0; i < passCount; i++) {
+      if (jobId !== undefined && isStale(jobId)) {
+        throw new Error("__cancelled__")
+      }
+
+      // Point draw helpers at this pass's source image.
+      cachedSource = current
+
+      // Pass 0: decay=1 and passSeed=settings.seed (identical to a 1-pass render).
+      const decay = Math.pow(settings.rate / 100, i)
+      const passSeed = settings.seed + i
+
+      // Phase 1 — layout/grid with per-pass seed (does not mutate settings.seed).
+      const layout = resolveLayout(
+        { ...settings, seed: passSeed },
+        width,
+        height
+      )
+
+      const isLast = i === passCount - 1
+      if (isLast) {
+        // Final pass: transfer the work canvas into the result bitmap.
+        const loopOutput = compositeCells(
+          layout,
+          settings,
+          width,
+          height,
+          decay
+        )
+        if (owned) {
+          try {
+            owned.close()
+          } catch {
+            // already closed
+          }
+          owned = null
+        }
+        return loopOutput
+      }
+
+      // Intermediate: ImageData → temp bitmap; keep shared work canvas intact.
+      const imageData = renderPassToImageData(
+        layout,
+        settings,
+        width,
+        height,
+        decay
+      )
+      if (owned) {
+        try {
+          owned.close()
+        } catch {
+          // already closed
+        }
+      }
+      owned = bitmapFromImageData(imageData)
+      current = owned
+    }
+
+    throw new Error("Recursive passes produced no output")
+  } finally {
+    cachedSource = previousSource
+    if (owned) {
+      try {
+        owned.close()
+      } catch {
+        // already closed
+      }
+    }
+  }
 }
 
 async function exportComposite(
@@ -590,39 +715,36 @@ async function exportComposite(
   const width = source.width
   const height = source.height
   // Always export the finished mosaic (never Visualize Noise / Cell Layout debug).
+  // Texture stays Phase 3-only (composite worker) — not inside the passes loop.
   const exportSettings: EffectSettings = {
     ...settings,
     showNoiseMap: false,
     showCellLayout: false,
   }
 
-  // Full-res override builds a one-off layout so the capped preview cache stays intact.
-  const layout = sourceOverride
-    ? generateLayout(exportSettings, width, height)
-    : resolveLayout(exportSettings, width, height)
-
-  const canvas = new OffscreenCanvas(width, height)
-  const ctx = canvas.getContext("2d", { willReadFrequently: true })
-  if (!ctx) {
-    if (sourceOverride) {
-      try {
-        sourceOverride.close()
-      } catch {
-        // already closed
-      }
-    }
-    post({ type: "EXPORT_ERROR", message: "Failed to create export canvas" })
-    return
-  }
-
-  // Temporarily point draw helpers at the export source without replacing preview cache.
-  const previousSource = cachedSource
+  // Full-res override: don't pollute the preview layout cache.
+  const previousLayout = cachedLayout
+  const previousLayoutParams = cachedLayoutParams
   if (sourceOverride) {
-    cachedSource = sourceOverride
+    clearLayoutCache()
   }
 
   try {
-    drawComposite(ctx, layout, exportSettings, width, height)
+    const bitmap = runRecursivePasses(
+      exportSettings,
+      width,
+      height,
+      source
+    )
+    const canvas = new OffscreenCanvas(width, height)
+    const ctx = canvas.getContext("2d")
+    if (!ctx) {
+      bitmap.close()
+      post({ type: "EXPORT_ERROR", message: "Failed to create export canvas" })
+      return
+    }
+    ctx.drawImage(bitmap, 0, 0)
+    bitmap.close()
     const blob = await canvas.convertToBlob({ type: "image/png" })
     post({ type: "EXPORT_COMPLETE", blob })
   } catch (err) {
@@ -631,8 +753,9 @@ async function exportComposite(
       message: err instanceof Error ? err.message : "PNG export failed",
     })
   } finally {
-    cachedSource = previousSource
     if (sourceOverride) {
+      cachedLayout = previousLayout
+      cachedLayoutParams = previousLayoutParams
       try {
         sourceOverride.close()
       } catch {
@@ -657,14 +780,28 @@ function renderFrame(jobId: number, settings: EffectSettings) {
 
   const width = cachedSource.width
   const height = cachedSource.height
-  const layout = resolveLayout(settings, width, height)
 
-  if (isStale(jobId)) {
-    post({ type: "cancelled", jobId })
+  let bitmap: ImageBitmap
+  try {
+    bitmap = runRecursivePasses(
+      settings,
+      width,
+      height,
+      cachedSource,
+      jobId
+    )
+  } catch (err) {
+    if (err instanceof Error && err.message === "__cancelled__") {
+      post({ type: "cancelled", jobId })
+      return
+    }
+    post({
+      type: "error",
+      jobId,
+      message: err instanceof Error ? err.message : "Render failed",
+    })
     return
   }
-
-  const bitmap = compositeCells(layout, settings, width, height)
 
   if (isStale(jobId)) {
     bitmap.close()

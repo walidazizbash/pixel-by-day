@@ -18,6 +18,9 @@
  * 3. Diagonal
  * 4. Recursive
  *
+ * Each style also runs an independent per-cell weight coin-flip
+ * (unique deterministic roll per style — not shared cell.randomVal).
+ *
  * All region ops respect rectangular Cell bounds (width × height),
  * including edge-clamped non-square Cells.
  */
@@ -52,6 +55,25 @@ function clampInt(v: number, lo: number, hi: number): number {
   return v
 }
 
+/**
+ * Scale a sample-origin shift relative to the Cell origin by pass decay.
+ * decay=1 → unchanged; decay=0 → identity (no smear motion).
+ */
+function decaySampleOrigin(
+  sx: number,
+  sy: number,
+  originX: number,
+  originY: number,
+  decay: number
+): { sx: number; sy: number } {
+  if (!(decay < 1)) return { sx, sy }
+  if (!(decay > 0)) return { sx: originX, sy: originY }
+  return {
+    sx: originX + Math.round((sx - originX) * decay),
+    sy: originY + Math.round((sy - originY) * decay),
+  }
+}
+
 /** Deterministic 0–1 value for a cell + salt. */
 function cellUnit(
   cell: CachedCell,
@@ -59,6 +81,34 @@ function cellUnit(
   salt: number
 ): number {
   return hash2D(cell.x + salt * 17, cell.y + salt * 31, seed >>> 0)
+}
+
+/**
+ * Unique salts for smear weight coin-flips (distinct from direction salts 101/202).
+ * Each style must roll independently so probabilities do not perfectly overlap.
+ */
+const SMEAR_WEIGHT_SALT = {
+  vertical: 1001,
+  horizontal: 1002,
+  diagonal: 1003,
+  recursive: 1004,
+} as const
+
+/**
+ * Independent coin flip: map a style-specific deterministic roll to 0–100.
+ * Apply when roll <= weight. Weight 100 always passes; weight 0 almost never.
+ */
+function passesSmearWeight(
+  cell: CachedCell,
+  seed: number,
+  salt: number,
+  weight: number
+): boolean {
+  const w = clampAmount(weight)
+  if (w <= 0) return false
+  if (w >= 100) return true
+  const roll = cellUnit(cell, seed, salt) * 100
+  return roll <= w
 }
 
 /** Copy the Cell's current work-buffer pixels into scratch (frozen prior state). */
@@ -308,7 +358,8 @@ function applyVerticalSmear(
   fullHeight: number,
   cell: CachedCell,
   amount: number,
-  edgeClamp: boolean
+  edgeClamp: boolean,
+  decay: number
 ) {
   const width = cell.width
   const height = cell.height
@@ -337,8 +388,13 @@ function applyVerticalSmear(
       fullWidth,
       fullHeight
     )
-    sx = clamped.sx
-    sy = clamped.sy
+    ;({ sx, sy } = decaySampleOrigin(
+      clamped.sx,
+      clamped.sy,
+      cell.x,
+      cell.y,
+      decay
+    ))
 
     const passes = 1 + Math.floor(enhance * 3)
     for (let p = 0; p < passes; p++) {
@@ -359,7 +415,7 @@ function applyVerticalSmear(
   const enhance = amountClamped / 100
   const maxUp = Math.max(0, Math.min(height - 1, cell.y))
   const targetSy = cell.y - Math.floor(maxUp * (0.35 + 0.65 * enhance))
-  const clamped = clampSourceOverlappingCell(
+  let clamped = clampSourceOverlappingCell(
     cell.x,
     Math.round(cell.y + (targetSy - cell.y) * enhance),
     cell.x,
@@ -369,6 +425,7 @@ function applyVerticalSmear(
     fullWidth,
     fullHeight
   )
+  clamped = decaySampleOrigin(clamped.sx, clamped.sy, cell.x, cell.y, decay)
   if (clamped.sx === cell.x && clamped.sy === cell.y) return
 
   const scratch = ensureSmearScratch(width * height * 4)
@@ -396,7 +453,8 @@ function applyHorizontalSmear(
   cell: CachedCell,
   amount: number,
   seed: number,
-  edgeClamp: boolean
+  edgeClamp: boolean,
+  decay: number
 ) {
   const width = cell.width
   const height = cell.height
@@ -430,8 +488,13 @@ function applyHorizontalSmear(
       fullWidth,
       fullHeight
     )
-    sx = clamped.sx
-    sy = clamped.sy
+    ;({ sx, sy } = decaySampleOrigin(
+      clamped.sx,
+      clamped.sy,
+      cell.x,
+      cell.y,
+      decay
+    ))
 
     const passes = 1 + Math.floor(enhance * 3)
     for (let p = 0; p < passes; p++) {
@@ -457,7 +520,7 @@ function applyHorizontalSmear(
   )
   const pull = Math.floor(maxSide * (0.35 + 0.65 * enhance))
   const targetSx = rightToLeft ? cell.x + pull : cell.x - pull
-  const clamped = clampSourceOverlappingCell(
+  let clamped = clampSourceOverlappingCell(
     Math.round(cell.x + (targetSx - cell.x) * enhance),
     cell.y,
     cell.x,
@@ -467,6 +530,7 @@ function applyHorizontalSmear(
     fullWidth,
     fullHeight
   )
+  clamped = decaySampleOrigin(clamped.sx, clamped.sy, cell.x, cell.y, decay)
   if (clamped.sx === cell.x && clamped.sy === cell.y) return
 
   const scratch = ensureSmearScratch(width * height * 4)
@@ -494,7 +558,8 @@ function applyDiagonalSmear(
   cell: CachedCell,
   amount: number,
   seed: number,
-  edgeClamp: boolean
+  edgeClamp: boolean,
+  decay: number
 ) {
   const width = cell.width
   const height = cell.height
@@ -536,8 +601,13 @@ function applyDiagonalSmear(
       fullWidth,
       fullHeight
     )
-    sx = clamped.sx
-    sy = clamped.sy
+    ;({ sx, sy } = decaySampleOrigin(
+      clamped.sx,
+      clamped.sy,
+      cell.x,
+      cell.y,
+      decay
+    ))
 
     const passes = 1 + Math.floor(enhance * 3)
     const xForward = signX < 0
@@ -597,7 +667,7 @@ function applyDiagonalSmear(
   const pullT = 0.2 + 0.45 * enhance
   const ox = Math.max(1, Math.floor((width - 1) * pullT))
   const oy = Math.max(1, Math.floor((height - 1) * pullT))
-  const clamped = clampSourceOverlappingCell(
+  let clamped = clampSourceOverlappingCell(
     cell.x + signX * ox,
     cell.y + signY * oy,
     cell.x,
@@ -607,6 +677,7 @@ function applyDiagonalSmear(
     fullWidth,
     fullHeight
   )
+  clamped = decaySampleOrigin(clamped.sx, clamped.sy, cell.x, cell.y, decay)
   if (clamped.sx === cell.x && clamped.sy === cell.y) return
 
   const scratch = ensureSmearScratch(width * height * 4)
@@ -634,14 +705,16 @@ function applyRecursiveSmear(
   fullHeight: number,
   cell: CachedCell,
   amount: number,
-  edgeClamp: boolean
+  edgeClamp: boolean,
+  decay: number
 ) {
   const width = cell.width
   const height = cell.height
   if (width < 1 || height < 1) return
 
   const amountClamped = clampAmount(amount)
-  if (amountClamped === 0) {
+  const smear = (amountClamped / 100) * decay
+  if (smear <= 0) {
     if (!edgeClamp) {
       copyCellBaselineClean(data, fullWidth, fullHeight, cell)
     }
@@ -649,7 +722,6 @@ function applyRecursiveSmear(
   }
   if (width < 4 || height < 4) return
 
-  const smear = amountClamped / 100
   const passes = 1 + Math.floor(smear * 4)
   const scratch = ensureSmearScratch(width * height * 4)
 
@@ -682,28 +754,49 @@ function applyRecursiveSmear(
  * Apply all enabled smear styles to one ON Cell, cumulatively.
  * Caller must already have seeded the Cell's pixels in `data`.
  * Independent sequential ifs — never if/else if between styles.
+ * Each style also needs its own weight coin-flip to pass.
+ * `decay` scales smear shift intensity only (not weight probabilities).
  */
 export function applySmearStyles(
   data: Uint8ClampedArray,
   fullWidth: number,
   fullHeight: number,
   cell: CachedCell,
-  settings: EffectSettings
+  settings: EffectSettings,
+  decay = 1
 ) {
   const seed = settings.seed >>> 0
   const edgeClamp = settings.edgeClamp
+  const smearDecay = Number.isFinite(decay) ? Math.max(0, decay) : 1
 
-  if (settings.smearVertical.enabled) {
+  if (
+    settings.smearVertical.enabled &&
+    passesSmearWeight(
+      cell,
+      seed,
+      SMEAR_WEIGHT_SALT.vertical,
+      settings.verticalWeight
+    )
+  ) {
     applyVerticalSmear(
       data,
       fullWidth,
       fullHeight,
       cell,
       settings.smearVertical.amount,
-      edgeClamp
+      edgeClamp,
+      smearDecay
     )
   }
-  if (settings.smearHorizontal.enabled) {
+  if (
+    settings.smearHorizontal.enabled &&
+    passesSmearWeight(
+      cell,
+      seed,
+      SMEAR_WEIGHT_SALT.horizontal,
+      settings.horizontalWeight
+    )
+  ) {
     applyHorizontalSmear(
       data,
       fullWidth,
@@ -711,10 +804,19 @@ export function applySmearStyles(
       cell,
       settings.smearHorizontal.amount,
       seed,
-      edgeClamp
+      edgeClamp,
+      smearDecay
     )
   }
-  if (settings.smearDiagonal.enabled) {
+  if (
+    settings.smearDiagonal.enabled &&
+    passesSmearWeight(
+      cell,
+      seed,
+      SMEAR_WEIGHT_SALT.diagonal,
+      settings.diagonalWeight
+    )
+  ) {
     applyDiagonalSmear(
       data,
       fullWidth,
@@ -722,17 +824,27 @@ export function applySmearStyles(
       cell,
       settings.smearDiagonal.amount,
       seed,
-      edgeClamp
+      edgeClamp,
+      smearDecay
     )
   }
-  if (settings.smearRecursive.enabled) {
+  if (
+    settings.smearRecursive.enabled &&
+    passesSmearWeight(
+      cell,
+      seed,
+      SMEAR_WEIGHT_SALT.recursive,
+      settings.recursiveWeight
+    )
+  ) {
     applyRecursiveSmear(
       data,
       fullWidth,
       fullHeight,
       cell,
       settings.smearRecursive.amount,
-      edgeClamp
+      edgeClamp,
+      smearDecay
     )
   }
 }

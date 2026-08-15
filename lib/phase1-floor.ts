@@ -784,11 +784,7 @@ export function generateLayout(
   imageWidth: number,
   imageHeight: number
 ): CachedLayout {
-  const seed = settings.seed >>> 0
-  const { gridWidth, gridHeight, baseCellSize } = gridDimensions(
-    imageWidth,
-    imageHeight
-  )
+  const { baseCellSize } = gridDimensions(imageWidth, imageHeight)
 
   if (settings.layoutMode === "subdivision") {
     const cells = generateSubdivisionLayout(
@@ -800,6 +796,9 @@ export function generateLayout(
     return { baseCellSize, cells }
   }
 
+  /*
+   * Standard layout mode (disabled — restore when re-enabling UI):
+   *
   const maxCellSize = Math.max(
     STRUCTURAL_MIN_CELL_SIZE,
     Math.min(20, Number(settings.maxCellSize) || STRUCTURAL_MIN_CELL_SIZE)
@@ -813,6 +812,12 @@ export function generateLayout(
     imageHeight,
     baseCellSize
   )
+  verifyPixelCoverage(cells, imageWidth, imageHeight)
+  return { baseCellSize, cells }
+  */
+
+  // Fallback while standard is disabled.
+  const cells = generateSubdivisionLayout(settings, imageWidth, imageHeight)
   verifyPixelCoverage(cells, imageWidth, imageHeight)
   return { baseCellSize, cells }
 }

@@ -42,7 +42,7 @@ function Slider({
   return (
     <SliderPrimitive.Root
       className={cn(
-        "touch-none data-horizontal:w-full data-vertical:h-full",
+        "block w-full min-w-0 touch-none data-horizontal:w-full data-vertical:h-full",
         className
       )}
       style={{ touchAction: "none" }}
@@ -56,7 +56,7 @@ function Slider({
       {...props}
     >
       <SliderPrimitive.Control
-        className="relative flex w-full cursor-pointer touch-none items-center select-none data-disabled:cursor-not-allowed data-disabled:opacity-50 data-vertical:h-full data-vertical:min-h-40 data-vertical:w-auto data-vertical:flex-col"
+        className="relative flex min-w-0 w-full cursor-pointer touch-none items-center select-none data-disabled:cursor-not-allowed data-disabled:opacity-50 data-vertical:h-full data-vertical:min-h-40 data-vertical:w-auto data-vertical:flex-col"
         style={{ touchAction: "none" }}
         onPointerDown={preventTouchScroll}
       >

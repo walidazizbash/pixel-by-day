@@ -48,6 +48,14 @@ export type EffectSettings = {
   smearHorizontal: SmearStyleSettings
   smearDiagonal: SmearStyleSettings
   smearRecursive: SmearStyleSettings
+  /**
+   * Independent per-cell probability (0–100) that each smear style runs.
+   * Coin-flipped separately per style — does not share cell.randomVal.
+   */
+  verticalWeight: number
+  horizontalWeight: number
+  diagonalWeight: number
+  recursiveWeight: number
   /** UI 1–100 noise frequency; worker maps to internal 0.01–0.5. */
   noiseScale: number
   /** UI 0–100: how much of the grid receives effects (50 = balanced). */
@@ -62,6 +70,17 @@ export type EffectSettings = {
   subdivisionMode: SubdivisionMode
   /** UI 10–100: split intensity (10 = none, 100 = max). */
   subdivisionRate: number
+  /**
+   * Recursive Phase 1+2 solver passes (1–3).
+   * Each pass feeds its output back as the next pass's source.
+   * Phase 3 texture is applied once after all passes complete.
+   */
+  passes: number
+  /**
+   * Per-pass smear intensity decay (0–100).
+   * Effective multiplier on pass i is (rate/100)^i — pass 0 is always full strength.
+   */
+  rate: number
   /** Debug: render Phase 2 boolean mask (white = ON, black = OFF). */
   showNoiseMap: boolean
   /** Debug: render the Phase 1 square floor as distinct colored Cells on black. */

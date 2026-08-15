@@ -23,7 +23,9 @@ function asBool(value: unknown, fallback: boolean): boolean {
 }
 
 function asLayoutMode(value: unknown): LayoutMode {
-  return value === "standard" || value === "subdivision" ? value : "subdivision"
+  // Standard layout mode disabled in UI — always subdivision for now.
+  void value
+  return "subdivision"
 }
 
 function asSubdivisionMode(value: unknown): SubdivisionMode {
@@ -66,6 +68,10 @@ export function sanitizeEffectSettings(raw: unknown): EffectSettings | null {
     smearHorizontal: sanitizeSmear(s.smearHorizontal),
     smearDiagonal: sanitizeSmear(s.smearDiagonal),
     smearRecursive: sanitizeSmear(s.smearRecursive),
+    verticalWeight: clampNum(s.verticalWeight, 0, 100, 80),
+    horizontalWeight: clampNum(s.horizontalWeight, 0, 100, 80),
+    diagonalWeight: clampNum(s.diagonalWeight, 0, 100, 80),
+    recursiveWeight: clampNum(s.recursiveWeight, 0, 100, 80),
     noiseScale: clampNum(s.noiseScale, 1, 100, 19),
     noiseSpread: clampNum(s.noiseSpread, 0, 100, 50),
     maxCellSize: clampNum(s.maxCellSize, 1, 100, 20) | 0,
@@ -73,6 +79,8 @@ export function sanitizeEffectSettings(raw: unknown): EffectSettings | null {
     subdivisionLoops: clampNum(s.subdivisionLoops, 1, 7, 4) | 0,
     subdivisionMode: asSubdivisionMode(s.subdivisionMode),
     subdivisionRate: clampNum(s.subdivisionRate, 10, 100, 60),
+    passes: clampNum(s.passes, 1, 3, 1) | 0,
+    rate: clampNum(s.rate, 0, 100, 50),
     showNoiseMap: asBool(s.showNoiseMap, false),
     showCellLayout: asBool(s.showCellLayout, false),
     textureEnabled: asBool(s.textureEnabled, true),
