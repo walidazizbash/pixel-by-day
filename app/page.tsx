@@ -217,6 +217,8 @@ export default function Home() {
   )
   const [seed, setSeed] = useState(20599)
   const [isDragging, setIsDragging] = useState(false)
+  const [reuseConfirmOpen, setReuseConfirmOpen] = useState(false)
+  const [isReusingImage, setIsReusingImage] = useState(false)
   const [randomSample, setRandomSample] = useState(false)
   const [edgeClamp, setEdgeClamp] = useState(false)
   const [smearVertical, setSmearVertical] = useState(() =>
@@ -433,12 +435,13 @@ export default function Home() {
     []
   )
 
-  const { isExportingPng, exportHighResImage } = useAppWorkers({
-    settings: effectSettings,
-    imageSrc,
-    onPreviewFrame,
-    onSourcePreview,
-  })
+  const { isExportingPng, exportHighResImage, capturePhase2PngBlob } =
+    useAppWorkers({
+      settings: effectSettings,
+      imageSrc,
+      onPreviewFrame,
+      onSourcePreview,
+    })
 
   function processFile(file: File) {
     if (!isAllowedImageFile(file)) {
@@ -521,6 +524,39 @@ export default function Home() {
     if (!snapshot) return
     setHistoryIndex(nextIndex)
     applyPhase12Settings(snapshot)
+  }
+
+  /**
+   * Open the Reuse Image confirmation modal.
+   * Actual swap runs only after Confirm (pre-grain Phase 2 capture).
+   */
+  function handleReuseImageClick() {
+    if (!imageSrc || isReusingImage) return
+    setReuseConfirmOpen(true)
+  }
+
+  async function confirmReuseImage() {
+    if (isReusingImage) return
+    setIsReusingImage(true)
+    try {
+      const blob = await capturePhase2PngBlob()
+      if (!blob) {
+        console.error(
+          "[pixel-by-day] Reuse Image: no Phase 2 frame available"
+        )
+        return
+      }
+      const url = URL.createObjectURL(blob)
+      setImageSrc((prev) => {
+        if (prev?.startsWith("blob:")) URL.revokeObjectURL(prev)
+        return url
+      })
+      setReuseConfirmOpen(false)
+    } catch (err) {
+      console.error("[pixel-by-day] Reuse Image failed", err)
+    } finally {
+      setIsReusingImage(false)
+    }
   }
 
   // Seed Auto Fill history with the current base settings whenever a source image is set.
@@ -609,6 +645,8 @@ export default function Home() {
   const sectionTitle =
     "font-heading text-xs font-medium uppercase tracking-[0.12em] text-slate-400"
   const controlLabel = "font-body text-sm text-slate-400"
+  const toolbarActionButton =
+    "h-7 shrink-0 rounded-2xl border border-white/10 bg-gradient-to-b from-slate-300 via-slate-400 to-slate-500 px-2.5 text-xs font-semibold text-slate-950 shadow-none transition-[background,opacity,transform] hover:from-slate-200 hover:via-slate-300 hover:to-slate-400 md:h-8"
   const helperText = "font-body text-xs text-slate-500"
   const bodyText = "font-body text-sm font-medium text-slate-200"
   const footerText = "font-footer text-xs text-slate-500"
@@ -1415,22 +1453,57 @@ export default function Home() {
               </button>
             )}
           </div>
-          <div className="grid shrink-0 grid-cols-[auto_1fr_auto] items-center gap-2 border-t border-white/10 px-3 py-1 md:px-6 md:py-4">
-            <Button
-              type="button"
-              size="sm"
-              className="h-7 shrink-0 justify-self-start rounded-2xl border border-white/10 bg-gradient-to-b from-slate-300 via-slate-400 to-slate-500 px-2.5 text-xs font-semibold text-slate-950 shadow-none transition-[background,opacity,transform] hover:from-slate-200 hover:via-slate-300 hover:to-slate-400 md:h-8"
-              onClick={() => {
-                if (fileInputRef.current) {
-                  fileInputRef.current.value = ""
-                  fileInputRef.current.click()
-                }
-              }}
-            >
-              Load Image
-            </Button>
+          <div className="flex shrink-0 flex-col gap-2 border-t border-white/10 px-3 py-2 md:grid md:grid-cols-[auto_1fr_auto] md:items-center md:gap-2 md:px-6 md:py-4">
+            <div className="flex items-center justify-center gap-2 md:contents">
+              <div className="flex shrink-0 items-center gap-2 md:justify-self-start">
+                <Button
+                  type="button"
+                  size="sm"
+                  className={toolbarActionButton}
+                  onClick={() => {
+                    if (fileInputRef.current) {
+                      fileInputRef.current.value = ""
+                      fileInputRef.current.click()
+                    }
+                  }}
+                >
+                  <span className="md:hidden">Load</span>
+                  <span className="hidden md:inline">Load Image</span>
+                </Button>
+                <Button
+                  type="button"
+                  size="sm"
+                  className={toolbarActionButton}
+                  disabled={!imageSrc || isReusingImage}
+                  title="Use the current output as the next input image"
+                  onClick={handleReuseImageClick}
+                >
+                  <span className="md:hidden">Reuse</span>
+                  <span className="hidden md:inline">Reuse Image</span>
+                </Button>
+              </div>
 
-            <div className="flex min-w-0 flex-wrap items-center justify-self-center gap-2 md:gap-3">
+              <Button
+                size="sm"
+                className={cn(
+                  toolbarActionButton,
+                  "justify-self-end md:col-start-3 md:shadow-lg"
+                )}
+                disabled={!imageSrc || isExportingPng}
+                onClick={exportHighResImage}
+              >
+                {isExportingPng ? (
+                  "Saving…"
+                ) : (
+                  <>
+                    <span className="md:hidden">Save</span>
+                    <span className="hidden md:inline">Save Image</span>
+                  </>
+                )}
+              </Button>
+            </div>
+
+            <div className="flex min-w-0 flex-wrap items-center justify-center gap-2 md:col-start-2 md:row-start-1 md:justify-self-center md:gap-3">
               <div className="flex min-w-0 max-w-[10rem] items-center gap-1.5 md:max-w-[12rem]">
                 <label
                   htmlFor="canvas-seed"
@@ -1483,58 +1556,46 @@ export default function Home() {
               </div>
 
               <div className="flex h-7 min-w-0 items-center rounded-md border border-white/10 bg-transparent md:h-8 md:rounded-lg">
-                  <button
-                    type="button"
-                    aria-label="Previous Random"
-                    title="Previous Random"
-                    disabled={!imageSrc || historyIndex <= 0}
-                    onClick={handleAutoFillBack}
-                    className="inline-flex h-full shrink-0 items-center justify-center px-1.5 text-slate-400 transition-colors hover:text-slate-100 disabled:pointer-events-none disabled:opacity-35 md:px-2"
-                  >
-                    <ChevronLeft
-                      className="size-3.5 md:size-4"
-                      strokeWidth={2}
-                    />
-                  </button>
-                  <button
-                    type="button"
-                    aria-label="Generate Random"
-                    title="Randomize layout and effects (keeps grain settings)"
-                    disabled={!imageSrc}
-                    onClick={handleAutoFill}
-                    className="min-w-0 px-2 text-center text-xs font-medium text-slate-400 transition-colors hover:text-slate-100 disabled:pointer-events-none disabled:opacity-35 md:px-2.5 md:text-sm"
-                  >
-                    Random
-                  </button>
-                  <button
-                    type="button"
-                    aria-label="Next Random"
-                    title="Next Random"
-                    disabled={
-                      !imageSrc || historyIndex >= autoFillHistory.length - 1
-                    }
-                    onClick={handleAutoFillForward}
-                    className="inline-flex h-full shrink-0 items-center justify-center px-1.5 text-slate-400 transition-colors hover:text-slate-100 disabled:pointer-events-none disabled:opacity-35 md:px-2"
-                  >
-                    <ChevronRight
-                      className="size-3.5 md:size-4"
-                      strokeWidth={2}
-                    />
-                  </button>
-                </div>
+                <button
+                  type="button"
+                  aria-label="Previous Random"
+                  title="Previous Random"
+                  disabled={!imageSrc || historyIndex <= 0}
+                  onClick={handleAutoFillBack}
+                  className="inline-flex h-full shrink-0 items-center justify-center px-1.5 text-slate-400 transition-colors hover:text-slate-100 disabled:pointer-events-none disabled:opacity-35 md:px-2"
+                >
+                  <ChevronLeft
+                    className="size-3.5 md:size-4"
+                    strokeWidth={2}
+                  />
+                </button>
+                <button
+                  type="button"
+                  aria-label="Generate Random"
+                  title="Randomize layout and effects (keeps grain settings)"
+                  disabled={!imageSrc}
+                  onClick={handleAutoFill}
+                  className="min-w-0 px-2 text-center text-xs font-medium text-slate-400 transition-colors hover:text-slate-100 disabled:pointer-events-none disabled:opacity-35 md:px-2.5 md:text-sm"
+                >
+                  Random
+                </button>
+                <button
+                  type="button"
+                  aria-label="Next Random"
+                  title="Next Random"
+                  disabled={
+                    !imageSrc || historyIndex >= autoFillHistory.length - 1
+                  }
+                  onClick={handleAutoFillForward}
+                  className="inline-flex h-full shrink-0 items-center justify-center px-1.5 text-slate-400 transition-colors hover:text-slate-100 disabled:pointer-events-none disabled:opacity-35 md:px-2"
+                >
+                  <ChevronRight
+                    className="size-3.5 md:size-4"
+                    strokeWidth={2}
+                  />
+                </button>
+              </div>
             </div>
-
-            <Button
-              size="sm"
-              className={cn(
-                "h-7 w-[4.25rem] shrink-0 justify-self-end rounded-2xl border border-white/10 bg-gradient-to-b from-slate-300 via-slate-400 to-slate-500 px-2.5 text-xs font-semibold text-slate-950 shadow-none transition-[background,opacity,transform] hover:from-slate-200 hover:via-slate-300 hover:to-slate-400",
-                "md:h-8 md:w-[5rem] md:px-4 md:text-sm md:shadow-lg"
-              )}
-              disabled={!imageSrc || isExportingPng}
-              onClick={exportHighResImage}
-            >
-              {isExportingPng ? "Saving…" : "Save"}
-            </Button>
           </div>
         </div>
       </main>
@@ -1550,6 +1611,60 @@ export default function Home() {
           Walid Aziz Basharyar
         </a>
       </footer>
+
+      {reuseConfirmOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4"
+          role="presentation"
+        >
+          <button
+            type="button"
+            aria-label="Dismiss dialog"
+            className="absolute inset-0 bg-black/60 backdrop-blur-[2px]"
+            onClick={() => {
+              if (!isReusingImage) setReuseConfirmOpen(false)
+            }}
+          />
+          <div
+            role="alertdialog"
+            aria-modal="true"
+            aria-labelledby="reuse-confirm-title"
+            className="relative z-10 w-full max-w-sm rounded-2xl border border-white/10 bg-slate-900/95 p-6 text-[#f5f5f7] shadow-[0_16px_48px_rgba(0,0,0,0.65)] backdrop-blur-xl"
+          >
+            <p
+              id="reuse-confirm-title"
+              className="text-center font-body text-sm leading-relaxed text-slate-200"
+            >
+              This will replace your original image
+              <br />
+              with the current output.
+            </p>
+            <div className="mt-6 flex items-center justify-center gap-3">
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                className="h-8 rounded-2xl border-white/10 bg-transparent px-4 text-xs font-semibold text-slate-300 shadow-none hover:bg-white/5 hover:text-slate-100"
+                disabled={isReusingImage}
+                onClick={() => setReuseConfirmOpen(false)}
+              >
+                Cancel
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                className={cn(toolbarActionButton, "h-8 px-4")}
+                disabled={isReusingImage}
+                onClick={() => {
+                  void confirmReuseImage()
+                }}
+              >
+                {isReusingImage ? "Working…" : "Confirm"}
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

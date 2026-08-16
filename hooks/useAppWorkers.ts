@@ -10,8 +10,6 @@ import type {
 
 /** Max edge length for interactive preview / Phase 2+3 worker buffers. */
 const MAX_PREVIEW_DIMENSION = 1200
-/** Max edge length for Save / high-res export (avoids mobile OOM). */
-const MAX_EXPORT_DIMENSION = 4096
 /** Hard reject for pathological source bitmaps. */
 const MAX_DECODE_EDGE = 8192
 const MAX_DECODE_PIXELS = 36_000_000
@@ -58,10 +56,6 @@ async function createPreviewBitmap(source: ImageBitmap | HTMLImageElement) {
   return createSizedBitmap(source, MAX_PREVIEW_DIMENSION)
 }
 
-async function createExportBitmap(source: ImageBitmap | HTMLImageElement) {
-  return createSizedBitmap(source, MAX_EXPORT_DIMENSION)
-}
-
 function downloadPngBlob(blob: Blob, filenamePrefix = "generated-mosaic") {
   const url = URL.createObjectURL(blob)
   const link = document.createElement("a")
@@ -71,15 +65,6 @@ function downloadPngBlob(blob: Blob, filenamePrefix = "generated-mosaic") {
   link.click()
   document.body.removeChild(link)
   URL.revokeObjectURL(url)
-}
-
-/** Export always ships the finished mosaic — never debug overlay frames. */
-function exportSettingsFrom(settings: EffectSettings): EffectSettings {
-  return {
-    ...settings,
-    showNoiseMap: false,
-    showCellLayout: false,
-  }
 }
 
 function textureSettingsFrom(
@@ -103,6 +88,11 @@ type UseAppWorkersOptions = {
 type UseAppWorkersResult = {
   isExportingPng: boolean
   exportHighResImage: () => void
+  /**
+   * PNG blob of the last Phase 2 frame (effects + smears), before Phase 3 grain.
+   * Used by Reuse Image so grain does not stack across recursive swaps.
+   */
+  capturePhase2PngBlob: () => Promise<Blob | null>
 }
 
 export function useAppWorkers({
@@ -120,10 +110,11 @@ export function useAppWorkers({
   const jobIdRef = useRef(0)
   const pendingDispatchRef = useRef(false)
   const pendingPhase3Ref = useRef(false)
+  /** Last finished preview frame (Phase 2, or Phase 3 if grain is on) — Save uses this. */
   const compositeBitmapRef = useRef<ImageBitmap | null>(null)
   /** Capped preview source (what the effect worker uses for interactive renders). */
   const sourceBitmapRef = useRef<ImageBitmap | null>(null)
-  /** Full-resolution source — used only for Save / high-res export. */
+  /** Full-resolution source — Save uses its native dimensions for PNG output size. */
   const fullSourceBitmapRef = useRef<ImageBitmap | null>(null)
   /** Last finished Phase 2 frame — reused for texture-only Phase 3 updates. */
   const phase2BitmapRef = useRef<ImageBitmap | null>(null)
@@ -263,34 +254,69 @@ export function useAppWorkers({
   }, [dispatchComposite, scheduleRegen])
 
   const exportHighResImage = useCallback(() => {
-    const effectSettings = settingsRef.current
     const fullSource = fullSourceBitmapRef.current
-    if (
-      !fullSource ||
-      !workerRef.current ||
-      isExportingPng ||
-      !effectSettings
-    ) {
+    const previewFrame = compositeBitmapRef.current
+    if (!fullSource || !previewFrame || isExportingPng) {
       return
     }
+
+    const outputWidth = Math.max(1, Math.round(fullSource.width))
+    const outputHeight = Math.max(1, Math.round(fullSource.height))
+
+    // Draw synchronously from the live preview frame before any await, so a
+    // concurrent regen can't close the ImageBitmap mid-export.
+    let canvas: OffscreenCanvas
+    try {
+      canvas = new OffscreenCanvas(outputWidth, outputHeight)
+      const ctx = canvas.getContext("2d")
+      if (!ctx) {
+        throw new Error("Failed to create export canvas")
+      }
+      ctx.imageSmoothingEnabled = true
+      ctx.imageSmoothingQuality = "high"
+      ctx.drawImage(previewFrame, 0, 0, outputWidth, outputHeight)
+    } catch (err) {
+      console.error("[pixel-by-day] Export prep failed", err)
+      return
+    }
+
     setIsExportingPng(true)
     void (async () => {
       try {
-        const exportBitmap = await createExportBitmap(fullSource)
-        workerRef.current?.postMessage(
-          {
-            type: "EXPORT",
-            settings: exportSettingsFrom(effectSettings),
-            bitmap: exportBitmap,
-          },
-          [exportBitmap]
-        )
+        const blob = await canvas.convertToBlob({ type: "image/png" })
+        downloadPngBlob(blob)
       } catch (err) {
+        console.error("[pixel-by-day] Export failed", err)
+      } finally {
         setIsExportingPng(false)
-        console.error("[pixel-by-day] Export prep failed", err)
       }
     })()
   }, [isExportingPng])
+
+  /** Capture Phase 2 only — never include Phase 3 grain. */
+  const capturePhase2PngBlob = useCallback(async (): Promise<Blob | null> => {
+    const phase2 = phase2BitmapRef.current
+    if (!phase2 || phase2.width < 1 || phase2.height < 1) return null
+
+    // Draw synchronously first so a concurrent regen can't close the bitmap mid-await.
+    let canvas: OffscreenCanvas
+    try {
+      canvas = new OffscreenCanvas(phase2.width, phase2.height)
+      const ctx = canvas.getContext("2d")
+      if (!ctx) return null
+      ctx.drawImage(phase2, 0, 0)
+    } catch (err) {
+      console.error("[pixel-by-day] Phase 2 capture failed", err)
+      return null
+    }
+
+    try {
+      return await canvas.convertToBlob({ type: "image/png" })
+    } catch (err) {
+      console.error("[pixel-by-day] Phase 2 PNG encode failed", err)
+      return null
+    }
+  }, [])
 
   useEffect(() => {
     const worker = new Worker(
@@ -318,36 +344,6 @@ export function useAppWorkers({
         console.error("[effect-worker]", msg.message)
         return
       }
-      if (msg.type === "EXPORT_COMPLETE") {
-        const effectSettings = settingsRef.current
-        if (effectSettings?.textureEnabled && compositeWorkerRef.current) {
-          void (async () => {
-            try {
-              const phase2 = await createImageBitmap(msg.blob)
-              compositeWorkerRef.current!.postMessage(
-                {
-                  type: "EXPORT",
-                  source: phase2,
-                  settings: textureSettingsFrom(effectSettings),
-                },
-                [phase2]
-              )
-            } catch (err) {
-              setIsExportingPng(false)
-              console.error("[pixel-by-day] Phase 3 export prep failed", err)
-            }
-          })()
-          return
-        }
-
-        setIsExportingPng(false)
-        downloadPngBlob(msg.blob)
-        return
-      }
-      if (msg.type === "EXPORT_ERROR") {
-        setIsExportingPng(false)
-        console.error("[effect-worker export]", msg.message)
-      }
     }
 
     compositeWorker.onmessage = (
@@ -366,15 +362,6 @@ export function useAppWorkers({
       if (msg.type === "error") {
         console.error("[composite-worker]", msg.message)
         return
-      }
-      if (msg.type === "EXPORT_COMPLETE") {
-        setIsExportingPng(false)
-        downloadPngBlob(msg.blob)
-        return
-      }
-      if (msg.type === "EXPORT_ERROR") {
-        setIsExportingPng(false)
-        console.error("[composite-worker export]", msg.message)
       }
     }
 
@@ -532,5 +519,6 @@ export function useAppWorkers({
   return {
     isExportingPng,
     exportHighResImage,
+    capturePhase2PngBlob,
   }
 }
