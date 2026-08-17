@@ -49,7 +49,6 @@ function baseSettings(
     noiseScale: 30,
     noiseSpread: 50,
     maxCellSize: 10,
-    layoutMode: "subdivision",
     subdivisionLoops: 3,
     subdivisionMode: "frontier",
     subdivisionRate: 60,
@@ -217,22 +216,19 @@ function main() {
 
   results.push(
     runCheck(6, "Every Cell is a perfect square", () => {
-      // Standard floor packing (UI disabled — engine code preserved in comments):
       const { gridWidth, gridHeight } = gridDimensions(width, height)
       const floor = packSquareFloor(gridWidth, gridHeight, 10, 42)
       for (const p of floor) {
         assert(p.span >= 1, "invalid span")
       }
-      // Active layout mode is subdivision — verify odd-size coverage.
       const odd = generateLayout(settings, 325, 247)
       verifyPixelCoverage(odd.cells, 325, 247)
-      return "standard floor spans OK; subdivision covers odd canvas"
+      return "floor packing spans OK; subdivision covers odd canvas"
     })
   )
 
   results.push(
     runCheck(7, "Every Cell is grid-aligned", () => {
-      // Standard floor grid (UI disabled — engine code preserved in comments):
       const { gridWidth, gridHeight } = gridDimensions(width, height)
       const floor = packSquareFloor(gridWidth, gridHeight, 10, 42)
       for (const p of floor) {
@@ -241,7 +237,7 @@ function main() {
       }
       const layout = generateLayout(settings, width, height)
       verifyPixelCoverage(layout.cells, width, height)
-      return "standard floor grid-aligned; subdivision covers canvas"
+      return "floor packing grid-aligned; subdivision covers canvas"
     })
   )
 

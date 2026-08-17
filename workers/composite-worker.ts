@@ -127,36 +127,6 @@ function isStale(jobId: number) {
   return jobId !== activeJobId
 }
 
-async function exportComposite(
-  source: ImageBitmap,
-  settings: CompositeTextureSettings
-) {
-  try {
-    const bitmap = settings.textureEnabled
-      ? await applyPhase3Grain(source, settings)
-      : source
-
-    const canvas = new OffscreenCanvas(bitmap.width, bitmap.height)
-    const ctx = canvas.getContext("2d")
-    if (!ctx) {
-      post({ type: "EXPORT_ERROR", message: "Failed to create export canvas" })
-      return
-    }
-    ctx.drawImage(bitmap, 0, 0)
-    if (bitmap !== source) bitmap.close()
-    source.close()
-
-    const blob = await canvas.convertToBlob({ type: "image/png" })
-    post({ type: "EXPORT_COMPLETE", blob })
-  } catch (err) {
-    source.close()
-    post({
-      type: "EXPORT_ERROR",
-      message: err instanceof Error ? err.message : "Phase 3 export failed",
-    })
-  }
-}
-
 self.onmessage = (event: MessageEvent<CompositeWorkerInMessage>) => {
   const msg = event.data
   if (!msg || typeof msg !== "object" || typeof msg.type !== "string") return
@@ -233,16 +203,5 @@ self.onmessage = (event: MessageEvent<CompositeWorkerInMessage>) => {
       }
     })()
     return
-  }
-
-  if (msg.type === "EXPORT") {
-    if (!(msg.source instanceof ImageBitmap)) return
-    const settings = sanitizeCompositeTextureSettings(msg.settings)
-    if (!settings) {
-      msg.source.close()
-      post({ type: "EXPORT_ERROR", message: "Invalid export settings" })
-      return
-    }
-    void exportComposite(msg.source, settings)
   }
 }

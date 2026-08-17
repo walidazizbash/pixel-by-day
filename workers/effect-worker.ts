@@ -691,80 +691,6 @@ function runRecursivePasses(
   }
 }
 
-async function exportComposite(
-  settings: EffectSettings,
-  sourceOverride?: ImageBitmap
-) {
-  const source = sourceOverride ?? cachedSource
-  if (!source) {
-    if (sourceOverride) {
-      try {
-        sourceOverride.close()
-      } catch {
-        // already closed
-      }
-    }
-    post({ type: "EXPORT_ERROR", message: "No source image cached in worker" })
-    return
-  }
-
-  // Cancel in-flight preview work so a temporary source swap can't race renders.
-  activeJobId += 1
-  queuedRender = null
-
-  const width = source.width
-  const height = source.height
-  // Always export the finished mosaic (never Visualize Noise / Cell Layout debug).
-  // Texture stays Phase 3-only (composite worker) — not inside the passes loop.
-  const exportSettings: EffectSettings = {
-    ...settings,
-    showNoiseMap: false,
-    showCellLayout: false,
-  }
-
-  // Full-res override: don't pollute the preview layout cache.
-  const previousLayout = cachedLayout
-  const previousLayoutParams = cachedLayoutParams
-  if (sourceOverride) {
-    clearLayoutCache()
-  }
-
-  try {
-    const bitmap = runRecursivePasses(
-      exportSettings,
-      width,
-      height,
-      source
-    )
-    const canvas = new OffscreenCanvas(width, height)
-    const ctx = canvas.getContext("2d")
-    if (!ctx) {
-      bitmap.close()
-      post({ type: "EXPORT_ERROR", message: "Failed to create export canvas" })
-      return
-    }
-    ctx.drawImage(bitmap, 0, 0)
-    bitmap.close()
-    const blob = await canvas.convertToBlob({ type: "image/png" })
-    post({ type: "EXPORT_COMPLETE", blob })
-  } catch (err) {
-    post({
-      type: "EXPORT_ERROR",
-      message: err instanceof Error ? err.message : "PNG export failed",
-    })
-  } finally {
-    if (sourceOverride) {
-      cachedLayout = previousLayout
-      cachedLayoutParams = previousLayoutParams
-      try {
-        sourceOverride.close()
-      } catch {
-        // already closed
-      }
-    }
-  }
-}
-
 // ─── Render orchestration ───────────────────────────────────────────────────
 
 function renderFrame(jobId: number, settings: EffectSettings) {
@@ -891,16 +817,5 @@ self.onmessage = (event: MessageEvent<EffectWorkerInMessage>) => {
     queuedRender = { jobId: msg.jobId, settings }
     pumpRenders()
     return
-  }
-
-  if (msg.type === "EXPORT") {
-    const settings = sanitizeEffectSettings(msg.settings)
-    if (!settings) {
-      post({ type: "EXPORT_ERROR", message: "Invalid export settings" })
-      return
-    }
-    const exportBitmap =
-      msg.bitmap instanceof ImageBitmap ? msg.bitmap : undefined
-    void exportComposite(settings, exportBitmap)
   }
 }

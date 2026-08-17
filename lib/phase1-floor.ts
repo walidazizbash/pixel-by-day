@@ -1,6 +1,6 @@
 /**
- * Phase 1 square-floor packing — shared by the effect worker and regression checks.
- * Do not retune FLOOR_TUNING here without an explicit packing task.
+ * Phase 1 layout — recursive subdivision grid shared by the effect worker
+ * and regression checks. `packSquareFloor` remains for verify-script invariants.
  *
  * Terminology:
  * - Cell: structural Mondrian block of the layout grid.
@@ -16,7 +16,7 @@ import type {
 } from "@/lib/effect-types"
 
 /** Bump when layout / composite semantics change. */
-const LAYOUT_CACHE_VERSION = 22
+const LAYOUT_CACHE_VERSION = 23
 
 /**
  * Structural floor minimum in Cell size units (grid spans).
@@ -91,8 +91,6 @@ export function extractLayoutParams(
     STRUCTURAL_MIN_CELL_SIZE,
     Math.min(20, Number(settings.maxCellSize) || STRUCTURAL_MIN_CELL_SIZE)
   )
-  const layoutMode =
-    settings.layoutMode === "subdivision" ? "subdivision" : "standard"
   const subdivisionMode =
     settings.subdivisionMode === "global" ? "global" : "frontier"
   return {
@@ -103,7 +101,6 @@ export function extractLayoutParams(
     baseCellSize: computeBaseCellSize(sourceWidth, sourceHeight),
     sourceWidth,
     sourceHeight,
-    layoutMode,
     subdivisionLoops: clampSubdivisionLoops(settings.subdivisionLoops),
     subdivisionMode,
     subdivisionRate: clampSubdivisionRate(settings.subdivisionRate),
@@ -119,7 +116,6 @@ export function layoutParamsEqual(a: LayoutParams, b: LayoutParams) {
     a.baseCellSize === b.baseCellSize &&
     a.sourceWidth === b.sourceWidth &&
     a.sourceHeight === b.sourceHeight &&
-    a.layoutMode === b.layoutMode &&
     a.subdivisionLoops === b.subdivisionLoops &&
     a.subdivisionMode === b.subdivisionMode &&
     a.subdivisionRate === b.subdivisionRate
@@ -468,22 +464,6 @@ export function verifyFloorCoverage(
   }
 }
 
-/** Clamp a Cell rectangle so it stays inside the pixel bounds. */
-function clampCellToPixels(
-  x: number,
-  y: number,
-  widthPixels: number,
-  heightPixels: number,
-  imageWidth: number,
-  imageHeight: number
-) {
-  let w = widthPixels
-  let h = heightPixels
-  if (x + w > imageWidth) w = imageWidth - x
-  if (y + h > imageHeight) h = imageHeight - y
-  return { x, y, width: w, height: h }
-}
-
 export function verifyPixelCoverage(
   layout: Array<Phase1GeometryCell>,
   imageWidth: number,
@@ -545,65 +525,6 @@ export function packSquareFloor(
   )
   fillOneByOneCleanup(claimed, cells, gridWidth, gridHeight)
   verifyFloorCoverage(cells, gridWidth, gridHeight)
-
-  return cells
-}
-
-function buildLayoutFromFloor(
-  raw: FloorSquare[],
-  settings: EffectSettings,
-  imageWidth: number,
-  imageHeight: number,
-  baseCellSize: number
-): CachedCell[] {
-  const seed = settings.seed >>> 0
-  const attrSeed = (seed ^ 0x9e3779b9) >>> 0
-  const sampleSeed = (seed ^ 0x85ebca6b) >>> 0
-  const randomSample = settings.randomSample
-  const cells: CachedCell[] = []
-
-  for (let i = 0; i < raw.length; i++) {
-    const part = raw[i]
-    const size = part.span * baseCellSize
-    const originX = part.gx * baseCellSize
-    const originY = part.gy * baseCellSize
-    const clamped = clampCellToPixels(
-      originX,
-      originY,
-      size,
-      size,
-      imageWidth,
-      imageHeight
-    )
-    if (clamped.width < 1 || clamped.height < 1) continue
-
-    let sx: number
-    let sy: number
-    if (randomSample) {
-      const maxSx = imageWidth - clamped.width
-      const maxSy = imageHeight - clamped.height
-      sx =
-        (hash2D(part.gx, part.gy, sampleSeed) * ((maxSx > 0 ? maxSx : 0) + 1)) |
-        0
-      sy =
-        (hash2D(part.gx + 17, part.gy + 31, sampleSeed) *
-          ((maxSy > 0 ? maxSy : 0) + 1)) |
-        0
-    } else {
-      sx = clamped.x
-      sy = clamped.y
-    }
-
-    cells.push({
-      x: clamped.x,
-      y: clamped.y,
-      width: clamped.width,
-      height: clamped.height,
-      sx,
-      sy,
-      randomVal: hash2D(part.gx, part.gy, attrSeed),
-    })
-  }
 
   return cells
 }
@@ -785,38 +706,6 @@ export function generateLayout(
   imageHeight: number
 ): CachedLayout {
   const { baseCellSize } = gridDimensions(imageWidth, imageHeight)
-
-  if (settings.layoutMode === "subdivision") {
-    const cells = generateSubdivisionLayout(
-      settings,
-      imageWidth,
-      imageHeight
-    )
-    verifyPixelCoverage(cells, imageWidth, imageHeight)
-    return { baseCellSize, cells }
-  }
-
-  /*
-   * Standard layout mode (disabled — restore when re-enabling UI):
-   *
-  const maxCellSize = Math.max(
-    STRUCTURAL_MIN_CELL_SIZE,
-    Math.min(20, Number(settings.maxCellSize) || STRUCTURAL_MIN_CELL_SIZE)
-  )
-
-  const floor = packSquareFloor(gridWidth, gridHeight, maxCellSize, seed)
-  const cells = buildLayoutFromFloor(
-    floor,
-    settings,
-    imageWidth,
-    imageHeight,
-    baseCellSize
-  )
-  verifyPixelCoverage(cells, imageWidth, imageHeight)
-  return { baseCellSize, cells }
-  */
-
-  // Fallback while standard is disabled.
   const cells = generateSubdivisionLayout(settings, imageWidth, imageHeight)
   verifyPixelCoverage(cells, imageWidth, imageHeight)
   return { baseCellSize, cells }

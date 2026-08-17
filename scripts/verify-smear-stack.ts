@@ -40,7 +40,6 @@ function makeSettings(overrides: Partial<EffectSettings> = {}): EffectSettings {
     noiseScale: 19,
     noiseSpread: 50,
     maxCellSize: 10,
-    layoutMode: "subdivision",
     subdivisionLoops: 3,
     subdivisionMode: "frontier",
     subdivisionRate: 60,

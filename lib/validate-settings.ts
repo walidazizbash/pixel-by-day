@@ -3,7 +3,7 @@ import type {
   EffectSettings,
   SmearStyleSettings,
 } from "@/lib/effect-types"
-import type { LayoutMode, SubdivisionMode } from "@/lib/layout-types"
+import type { SubdivisionMode } from "@/lib/layout-types"
 
 function clampNum(
   value: unknown,
@@ -20,12 +20,6 @@ function clampNum(
 
 function asBool(value: unknown, fallback: boolean): boolean {
   return typeof value === "boolean" ? value : fallback
-}
-
-function asLayoutMode(value: unknown): LayoutMode {
-  // Standard layout mode disabled in UI — always subdivision for now.
-  void value
-  return "subdivision"
 }
 
 function asSubdivisionMode(value: unknown): SubdivisionMode {
@@ -75,7 +69,6 @@ export function sanitizeEffectSettings(raw: unknown): EffectSettings | null {
     noiseScale: clampNum(s.noiseScale, 1, 100, 19),
     noiseSpread: clampNum(s.noiseSpread, 0, 100, 50),
     maxCellSize: clampNum(s.maxCellSize, 1, 100, 20) | 0,
-    layoutMode: asLayoutMode(s.layoutMode),
     subdivisionLoops: clampNum(s.subdivisionLoops, 1, 7, 4) | 0,
     subdivisionMode: asSubdivisionMode(s.subdivisionMode),
     subdivisionRate: clampNum(s.subdivisionRate, 10, 100, 60),

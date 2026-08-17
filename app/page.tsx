@@ -139,6 +139,42 @@ const CONTROL_DEFAULTS = {
   rate: 50,
 } as const
 
+/** Default global seed (matches initial page state). */
+const DEFAULT_SEED = 20599
+
+function buildDefaultEffectSettings(): EffectSettings {
+  return {
+    seed: DEFAULT_SEED,
+    weightDither: CONTROL_DEFAULTS.weightDither,
+    weightInvert: CONTROL_DEFAULTS.weightInvert,
+    weightSurreal: CONTROL_DEFAULTS.weightSurreal,
+    weightPixelate: CONTROL_DEFAULTS.weightPixelate,
+    weightOriginal: CONTROL_DEFAULTS.weightOriginal,
+    randomSample: false,
+    edgeClamp: false,
+    smearVertical: defaultSmear(false, SMEAR_AMOUNT_DEFAULTS.vertical),
+    smearHorizontal: defaultSmear(true, SMEAR_AMOUNT_DEFAULTS.horizontal),
+    smearDiagonal: defaultSmear(false, SMEAR_AMOUNT_DEFAULTS.diagonal),
+    smearRecursive: defaultSmear(false, SMEAR_AMOUNT_DEFAULTS.recursive),
+    verticalWeight: SMEAR_WEIGHT_DEFAULTS.vertical,
+    horizontalWeight: SMEAR_WEIGHT_DEFAULTS.horizontal,
+    diagonalWeight: SMEAR_WEIGHT_DEFAULTS.diagonal,
+    recursiveWeight: SMEAR_WEIGHT_DEFAULTS.recursive,
+    noiseScale: CONTROL_DEFAULTS.noiseScale,
+    noiseSpread: CONTROL_DEFAULTS.noiseSpread,
+    maxCellSize: CONTROL_DEFAULTS.maxCellSize,
+    subdivisionLoops: CONTROL_DEFAULTS.subdivisionLoops,
+    subdivisionMode: "frontier",
+    subdivisionRate: CONTROL_DEFAULTS.subdivisionRate,
+    passes: CONTROL_DEFAULTS.passes,
+    rate: CONTROL_DEFAULTS.rate,
+    showNoiseMap: false,
+    showCellLayout: false,
+    textureEnabled: true,
+    textureOpacity: CONTROL_DEFAULTS.textureOpacity,
+  }
+}
+
 function ResetAmountButton({
   label,
   defaultValue,
@@ -215,10 +251,10 @@ export default function Home() {
   const [imageSrc, setImageSrc] = useState<string | null>(
     "/images/Portrait_01.webp"
   )
-  const [seed, setSeed] = useState(20599)
+  const [seed, setSeed] = useState(DEFAULT_SEED)
   const [isDragging, setIsDragging] = useState(false)
-  const [reuseConfirmOpen, setReuseConfirmOpen] = useState(false)
-  const [isReusingImage, setIsReusingImage] = useState(false)
+  const [bakeConfirmOpen, setBakeConfirmOpen] = useState(false)
+  const [isBaking, setIsBaking] = useState(false)
   const [randomSample, setRandomSample] = useState(false)
   const [edgeClamp, setEdgeClamp] = useState(false)
   const [smearVertical, setSmearVertical] = useState(() =>
@@ -247,9 +283,6 @@ export default function Home() {
   )
   const [noiseScale, setNoiseScale] = useState<number>(CONTROL_DEFAULTS.noiseScale)
   const [noiseSpread, setNoiseSpread] = useState<number>(CONTROL_DEFAULTS.noiseSpread)
-  // Standard layout mode disabled — keep defaults for worker payload only.
-  // const [maxCellSize, setMaxCellSize] = useState(CONTROL_DEFAULTS.maxCellSize)
-  // const [layoutMode, setLayoutMode] = useState<LayoutMode>("subdivision")
   const [subdivisionLoops, setSubdivisionLoops] = useState<number>(
     CONTROL_DEFAULTS.subdivisionLoops
   )
@@ -259,6 +292,8 @@ export default function Home() {
     CONTROL_DEFAULTS.subdivisionRate
   )
   const [passes, setPasses] = useState<number>(CONTROL_DEFAULTS.passes)
+  /** Continuous thumb position while dragging Repeat (engine still uses integer `passes`). */
+  const [passesDrag, setPassesDrag] = useState<number | null>(null)
   const [rate, setRate] = useState<number>(CONTROL_DEFAULTS.rate)
   const [showNoiseMap, setShowNoiseMap] = useState(false)
   const [showCellLayout, setShowCellLayout] = useState(false)
@@ -281,12 +316,18 @@ export default function Home() {
   const [weightOriginal, setWeightOriginal] = useState<number>(
     CONTROL_DEFAULTS.weightOriginal
   )
-  const [autoFillHistory, setAutoFillHistory] = useState<EffectSettings[]>([])
-  const [historyIndex, setHistoryIndex] = useState(-1)
+  const [autoFillHistory, setAutoFillHistory] = useState<EffectSettings[]>(() => [
+    cloneEffectSettings(buildDefaultEffectSettings()),
+  ])
+  const [historyIndex, setHistoryIndex] = useState(0)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const liveCanvasRef = useRef<HTMLCanvasElement>(null)
   const previewPaneRef = useRef<HTMLDivElement>(null)
-  const settingsRef = useRef<EffectSettings | null>(null)
+
+  function seedRandomHistory(base: EffectSettings) {
+    setAutoFillHistory([cloneEffectSettings(base)])
+    setHistoryIndex(0)
+  }
 
   const effectSettings: EffectSettings = {
     seed,
@@ -308,7 +349,6 @@ export default function Home() {
     noiseScale,
     noiseSpread,
     maxCellSize: CONTROL_DEFAULTS.maxCellSize,
-    layoutMode: "subdivision",
     subdivisionLoops,
     subdivisionMode,
     subdivisionRate,
@@ -319,12 +359,12 @@ export default function Home() {
     textureEnabled,
     textureOpacity,
   }
-  settingsRef.current = effectSettings
 
   /** Apply Phase 1+2 from a history snapshot; keep current Phase 3 + debug overlays. */
   function applyPhase12Settings(next: EffectSettings) {
     setSeed(next.seed)
     setPasses(next.passes)
+    setPassesDrag(null)
     setRate(next.rate)
     setSubdivisionLoops(next.subdivisionLoops)
     setSubdivisionRate(next.subdivisionRate)
@@ -471,6 +511,7 @@ export default function Home() {
           if (prev?.startsWith("blob:")) URL.revokeObjectURL(prev)
           return url
         })
+        seedRandomHistory(effectSettings)
       } catch {
         alert("Could not read that image. Please try another file.")
       }
@@ -493,8 +534,7 @@ export default function Home() {
    * Pushes onto the Random history stack (truncating any redo future).
    */
   function handleAutoFill() {
-    const base = settingsRef.current
-    if (!base) return
+    const base = effectSettings
 
     const newSettings = cloneEffectSettings(buildRandomPhase12Settings(base))
     const truncated = autoFillHistory.slice(0, Math.max(0, historyIndex + 1))
@@ -527,23 +567,31 @@ export default function Home() {
   }
 
   /**
-   * Open the Reuse Image confirmation modal.
-   * Actual swap runs only after Confirm (pre-grain Phase 2 capture).
+   * Reset every generation control to the app's default starting state.
+   * Used by Bake so the next pass starts clean.
    */
-  function handleReuseImageClick() {
-    if (!imageSrc || isReusingImage) return
-    setReuseConfirmOpen(true)
+  function resetGenerationParameters() {
+    const defaults = buildDefaultEffectSettings()
+    applyPhase12Settings(defaults)
+    setTextureEnabled(defaults.textureEnabled)
+    setTextureOpacity(defaults.textureOpacity)
+    setShowNoiseMap(defaults.showNoiseMap)
+    setShowCellLayout(defaults.showCellLayout)
   }
 
-  async function confirmReuseImage() {
-    if (isReusingImage) return
-    setIsReusingImage(true)
+  /** Open the Bake confirmation modal (pre-grain Phase 2 capture on confirm). */
+  function handleBakeClick() {
+    if (!imageSrc || isBaking) return
+    setBakeConfirmOpen(true)
+  }
+
+  async function confirmBake() {
+    if (isBaking) return
+    setIsBaking(true)
     try {
       const blob = await capturePhase2PngBlob()
       if (!blob) {
-        console.error(
-          "[pixel-by-day] Reuse Image: no Phase 2 frame available"
-        )
+        console.error("[pixel-by-day] Bake: no Phase 2 frame available")
         return
       }
       const url = URL.createObjectURL(blob)
@@ -551,26 +599,15 @@ export default function Home() {
         if (prev?.startsWith("blob:")) URL.revokeObjectURL(prev)
         return url
       })
-      setReuseConfirmOpen(false)
+      resetGenerationParameters()
+      seedRandomHistory(buildDefaultEffectSettings())
+      setBakeConfirmOpen(false)
     } catch (err) {
-      console.error("[pixel-by-day] Reuse Image failed", err)
+      console.error("[pixel-by-day] Bake failed", err)
     } finally {
-      setIsReusingImage(false)
+      setIsBaking(false)
     }
   }
-
-  // Seed Auto Fill history with the current base settings whenever a source image is set.
-  useEffect(() => {
-    if (!imageSrc) {
-      setAutoFillHistory([])
-      setHistoryIndex(-1)
-      return
-    }
-    const base = settingsRef.current
-    if (!base) return
-    setAutoFillHistory([cloneEffectSettings(base)])
-    setHistoryIndex(0)
-  }, [imageSrc])
 
   useEffect(() => {
     function refit() {
@@ -646,7 +683,7 @@ export default function Home() {
     "font-heading text-xs font-medium uppercase tracking-[0.12em] text-slate-400"
   const controlLabel = "font-body text-sm text-slate-400"
   const toolbarActionButton =
-    "h-7 shrink-0 rounded-2xl border border-white/10 bg-gradient-to-b from-slate-300 via-slate-400 to-slate-500 px-2.5 text-xs font-semibold text-slate-950 shadow-none transition-[background,opacity,transform] hover:from-slate-200 hover:via-slate-300 hover:to-slate-400 md:h-8"
+    "h-7 shrink-0 rounded-2xl border border-white/10 bg-gradient-to-b from-slate-300 via-slate-400 to-slate-500 px-6 text-xs font-semibold text-slate-950 shadow-none transition-[background,opacity,transform] hover:from-slate-200 hover:via-slate-300 hover:to-slate-400 md:h-8"
   const helperText = "font-body text-xs text-slate-500"
   const bodyText = "font-body text-sm font-medium text-slate-200"
   const footerText = "font-footer text-xs text-slate-500"
@@ -684,17 +721,49 @@ export default function Home() {
               </label>
             </div>
             <div className={sliderRow}>
-              <Slider
-                id="pipeline-passes"
-                className={sliderTrackClass}
-                value={[passes]}
-                min={1}
-                max={3}
-                step={1}
-                onValueChange={(value) =>
-                  setPasses(sliderValue(value, CONTROL_DEFAULTS.passes))
-                }
-              />
+              <div className={cn(sliderTrackClass, "relative")}>
+                <Slider
+                  id="pipeline-passes"
+                  className="relative z-10 w-full min-w-0"
+                  value={[passesDrag ?? passes]}
+                  min={1}
+                  max={3}
+                  step={0.01}
+                  onValueChange={(value) => {
+                    const raw = sliderValue(value, CONTROL_DEFAULTS.passes)
+                    setPassesDrag(raw)
+                    setPasses(
+                      Math.max(1, Math.min(3, Math.round(raw)))
+                    )
+                  }}
+                  onValueCommitted={(value) => {
+                    const raw = sliderValue(value, CONTROL_DEFAULTS.passes)
+                    setPasses(
+                      Math.max(1, Math.min(3, Math.round(raw)))
+                    )
+                    setPassesDrag(null)
+                  }}
+                />
+                {/* Integer stop ticks (1 / 2 / 3) — ends sit at the track tips */}
+                <div
+                  aria-hidden
+                  className="pointer-events-none absolute inset-x-0 top-1/2 z-0 h-0"
+                >
+                  {[0, 50, 100].map((pct) => (
+                    <span
+                      key={pct}
+                      className={cn(
+                        "absolute top-0 h-1.5 w-px -translate-y-1/2 bg-slate-400",
+                        pct === 0
+                          ? "left-0"
+                          : pct === 100
+                            ? "right-0"
+                            : "left-1/2 -translate-x-1/2"
+                      )}
+                    />
+                  ))}
+                </div>
+              </div>
               <div className="flex shrink-0 items-center gap-0.5">
                 <span className={sliderValueReadout} aria-hidden="true">
                   {passes}
@@ -702,7 +771,10 @@ export default function Home() {
                 <ResetAmountButton
                   label="Repeat"
                   defaultValue={CONTROL_DEFAULTS.passes}
-                  onReset={() => setPasses(CONTROL_DEFAULTS.passes)}
+                  onReset={() => {
+                    setPasses(CONTROL_DEFAULTS.passes)
+                    setPassesDrag(null)
+                  }}
                 />
               </div>
             </div>
@@ -758,17 +830,6 @@ export default function Home() {
               onCheckedChange={handleShowCellLayoutChange}
             />
           </div>
-
-          {/*
-          Standard layout mode (disabled — restore when re-enabling UI):
-          <div className="flex items-center justify-between gap-4">
-            <span className={controlLabel}>Mode</span>
-            ...
-          </div>
-          {layoutMode === "standard" && (
-            <div className={controlField}>Max Cell Size slider...</div>
-          )}
-          */}
 
           <div className="flex items-center justify-between gap-4">
             <span className={controlLabel}>Mode</span>
@@ -1416,17 +1477,15 @@ export default function Home() {
             "flex h-full min-h-0 flex-col gap-0 overflow-hidden p-0 md:min-h-0 md:flex-1"
           )}
         >
-          <div className="relative flex min-h-0 w-full flex-1 touch-none items-center justify-center overflow-hidden p-2 text-slate-500 sm:p-4 md:p-6">
+          <div className="relative flex min-h-0 w-full flex-1 touch-manipulation items-center justify-center overflow-hidden p-2 text-slate-500 sm:p-4 md:p-6">
             {imageSrc ? (
               <div
                 ref={previewPaneRef}
-                className="flex h-full max-h-full w-full max-w-[1200px] touch-none items-center justify-center overflow-hidden md:max-h-[80vh]"
-                style={{ touchAction: "none" }}
+                className="flex h-full max-h-full w-full max-w-[1200px] touch-manipulation items-center justify-center overflow-hidden md:max-h-[80vh]"
               >
                 <canvas
                   ref={liveCanvasRef}
-                  className="block touch-none"
-                  style={{ touchAction: "none" }}
+                  className="block touch-manipulation"
                 />
               </div>
             ) : (
@@ -1453,57 +1512,8 @@ export default function Home() {
               </button>
             )}
           </div>
-          <div className="flex shrink-0 flex-col gap-2 border-t border-white/10 px-3 py-2 md:grid md:grid-cols-[auto_1fr_auto] md:items-center md:gap-2 md:px-6 md:py-4">
-            <div className="flex items-center justify-center gap-2 md:contents">
-              <div className="flex shrink-0 items-center gap-2 md:justify-self-start">
-                <Button
-                  type="button"
-                  size="sm"
-                  className={toolbarActionButton}
-                  onClick={() => {
-                    if (fileInputRef.current) {
-                      fileInputRef.current.value = ""
-                      fileInputRef.current.click()
-                    }
-                  }}
-                >
-                  <span className="md:hidden">Load</span>
-                  <span className="hidden md:inline">Load Image</span>
-                </Button>
-                <Button
-                  type="button"
-                  size="sm"
-                  className={toolbarActionButton}
-                  disabled={!imageSrc || isReusingImage}
-                  title="Use the current output as the next input image"
-                  onClick={handleReuseImageClick}
-                >
-                  <span className="md:hidden">Reuse</span>
-                  <span className="hidden md:inline">Reuse Image</span>
-                </Button>
-              </div>
-
-              <Button
-                size="sm"
-                className={cn(
-                  toolbarActionButton,
-                  "justify-self-end md:col-start-3 md:shadow-lg"
-                )}
-                disabled={!imageSrc || isExportingPng}
-                onClick={exportHighResImage}
-              >
-                {isExportingPng ? (
-                  "Saving…"
-                ) : (
-                  <>
-                    <span className="md:hidden">Save</span>
-                    <span className="hidden md:inline">Save Image</span>
-                  </>
-                )}
-              </Button>
-            </div>
-
-            <div className="flex min-w-0 flex-wrap items-center justify-center gap-2 md:col-start-2 md:row-start-1 md:justify-self-center md:gap-3">
+          <div className="flex shrink-0 flex-col items-center gap-2 border-t border-white/10 px-3 py-2 md:gap-3 md:px-6 md:py-4">
+            <div className="flex min-w-0 flex-wrap items-center justify-center gap-2 md:gap-3">
               <div className="flex min-w-0 max-w-[10rem] items-center gap-1.5 md:max-w-[12rem]">
                 <label
                   htmlFor="canvas-seed"
@@ -1596,6 +1606,50 @@ export default function Home() {
                 </button>
               </div>
             </div>
+
+            <div className="flex flex-wrap items-center justify-center gap-2">
+              <Button
+                type="button"
+                size="sm"
+                className={toolbarActionButton}
+                onClick={() => {
+                  if (fileInputRef.current) {
+                    fileInputRef.current.value = ""
+                    fileInputRef.current.click()
+                  }
+                }}
+              >
+                Load
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                className={toolbarActionButton}
+                disabled={!imageSrc || isBaking}
+                title="Bake the current output as the next input image"
+                onClick={handleBakeClick}
+              >
+                Bake
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                className={toolbarActionButton}
+                disabled={!imageSrc}
+                title="Reset all generation parameters to defaults"
+                onClick={resetGenerationParameters}
+              >
+                Reset
+              </Button>
+              <Button
+                size="sm"
+                className={toolbarActionButton}
+                disabled={!imageSrc || isExportingPng}
+                onClick={exportHighResImage}
+              >
+                {isExportingPng ? "Saving…" : "Save"}
+              </Button>
+            </div>
           </div>
         </div>
       </main>
@@ -1612,7 +1666,7 @@ export default function Home() {
         </a>
       </footer>
 
-      {reuseConfirmOpen && (
+      {bakeConfirmOpen && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center p-4"
           role="presentation"
@@ -1622,22 +1676,22 @@ export default function Home() {
             aria-label="Dismiss dialog"
             className="absolute inset-0 bg-black/60 backdrop-blur-[2px]"
             onClick={() => {
-              if (!isReusingImage) setReuseConfirmOpen(false)
+              if (!isBaking) setBakeConfirmOpen(false)
             }}
           />
           <div
             role="alertdialog"
             aria-modal="true"
-            aria-labelledby="reuse-confirm-title"
+            aria-labelledby="bake-confirm-title"
             className="relative z-10 w-full max-w-sm rounded-2xl border border-white/10 bg-slate-900/95 p-6 text-[#f5f5f7] shadow-[0_16px_48px_rgba(0,0,0,0.65)] backdrop-blur-xl"
           >
             <p
-              id="reuse-confirm-title"
+              id="bake-confirm-title"
               className="text-center font-body text-sm leading-relaxed text-slate-200"
             >
               This will replace your original image
               <br />
-              with the current output.
+              and reset all parameters.
             </p>
             <div className="mt-6 flex items-center justify-center gap-3">
               <Button
@@ -1645,8 +1699,8 @@ export default function Home() {
                 size="sm"
                 variant="outline"
                 className="h-8 rounded-2xl border-white/10 bg-transparent px-4 text-xs font-semibold text-slate-300 shadow-none hover:bg-white/5 hover:text-slate-100"
-                disabled={isReusingImage}
-                onClick={() => setReuseConfirmOpen(false)}
+                disabled={isBaking}
+                onClick={() => setBakeConfirmOpen(false)}
               >
                 Cancel
               </Button>
@@ -1654,12 +1708,12 @@ export default function Home() {
                 type="button"
                 size="sm"
                 className={cn(toolbarActionButton, "h-8 px-4")}
-                disabled={isReusingImage}
+                disabled={isBaking}
                 onClick={() => {
-                  void confirmReuseImage()
+                  void confirmBake()
                 }}
               >
-                {isReusingImage ? "Working…" : "Confirm"}
+                {isBaking ? "Working…" : "Confirm"}
               </Button>
             </div>
           </div>

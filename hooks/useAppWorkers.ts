@@ -90,7 +90,7 @@ type UseAppWorkersResult = {
   exportHighResImage: () => void
   /**
    * PNG blob of the last Phase 2 frame (effects + smears), before Phase 3 grain.
-   * Used by Reuse Image so grain does not stack across recursive swaps.
+   * Used by Bake so grain does not stack across recursive swaps.
    */
   capturePhase2PngBlob: () => Promise<Blob | null>
 }
@@ -397,7 +397,6 @@ export function useAppWorkers({
     settings.noiseScale,
     settings.noiseSpread,
     settings.maxCellSize,
-    settings.layoutMode,
     settings.subdivisionLoops,
     settings.subdivisionMode,
     settings.subdivisionRate,

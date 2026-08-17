@@ -3,8 +3,6 @@
  * Mask / effect settings must never live here.
  */
 
-export type LayoutMode = "standard" | "subdivision"
-
 export type SubdivisionMode = "frontier" | "global"
 
 /**
@@ -20,10 +18,9 @@ export type LayoutParams = {
   baseCellSize: number
   sourceWidth: number
   sourceHeight: number
-  layoutMode: LayoutMode
-  /** Subdivision pass count (1–7). Ignored in standard mode. */
+  /** Subdivision pass count (1–7). */
   subdivisionLoops: number
-  /** Which Cell pool is eligible each loop. Ignored in standard mode. */
+  /** Which Cell pool is eligible each loop. */
   subdivisionMode: SubdivisionMode
   /** UI 10–100: split intensity (10 = none, 100 = max). */
   subdivisionRate: number

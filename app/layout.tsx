@@ -24,6 +24,8 @@ const socialDescription =
 export const viewport: Viewport = {
   width: "device-width",
   initialScale: 1,
+  // Explicitly allow pinch / accessibility zoom (never set maximumScale or userScalable: false).
+  userScalable: true,
   themeColor: "#08080a",
   viewportFit: "cover",
 }

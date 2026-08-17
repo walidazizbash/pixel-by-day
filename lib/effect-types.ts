@@ -1,9 +1,8 @@
-import type { LayoutMode, SubdivisionMode } from "@/lib/layout-types"
+import type { SubdivisionMode } from "@/lib/layout-types"
 
 export type {
   CachedCell,
   CachedLayout,
-  LayoutMode,
   LayoutParams,
   SubdivisionMode,
 } from "@/lib/layout-types"
@@ -60,10 +59,8 @@ export type EffectSettings = {
   noiseScale: number
   /** UI 0–100: how much of the grid receives effects (50 = balanced). */
   noiseSpread: number
-  /** UI max structural Cell size (in baseCellSize grid units). Standard mode. */
+  /** UI max structural Cell size (in baseCellSize grid units). */
   maxCellSize: number
-  /** Phase 1 layout algorithm. */
-  layoutMode: LayoutMode
   /** Subdivision pass count (1–7). */
   subdivisionLoops: number
   /** Frontier = only newly split Cells; global = all Cells each loop. */
@@ -102,12 +99,6 @@ export type EffectWorkerInMessage =
   | { type: "setSource"; bitmap: ImageBitmap }
   | { type: "clearSource" }
   | { type: "render"; jobId: number; settings: EffectSettings }
-  | {
-      type: "EXPORT"
-      settings: EffectSettings
-      /** Optional full-resolution source for export; preview may use a capped bitmap. */
-      bitmap?: ImageBitmap
-    }
 
 export type EffectWorkerOutMessage =
   | {
@@ -119,19 +110,12 @@ export type EffectWorkerOutMessage =
     }
   | { type: "cancelled"; jobId: number }
   | { type: "error"; jobId: number; message: string }
-  | { type: "EXPORT_COMPLETE"; blob: Blob }
-  | { type: "EXPORT_ERROR"; message: string }
 
 export type CompositeWorkerInMessage =
   | {
       type: "composite"
       jobId: number
       /** Phase 2 finished frame (transferred). */
-      source: ImageBitmap
-      settings: CompositeTextureSettings
-    }
-  | {
-      type: "EXPORT"
       source: ImageBitmap
       settings: CompositeTextureSettings
     }
@@ -146,5 +130,3 @@ export type CompositeWorkerOutMessage =
     }
   | { type: "cancelled"; jobId: number }
   | { type: "error"; jobId: number; message: string }
-  | { type: "EXPORT_COMPLETE"; blob: Blob }
-  | { type: "EXPORT_ERROR"; message: string }
