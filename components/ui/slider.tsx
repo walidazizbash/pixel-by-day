@@ -31,6 +31,8 @@ function Slider({
   min = 0,
   max = 100,
   onPointerDown,
+  "aria-label": ariaLabel,
+  "aria-labelledby": ariaLabelledBy,
   ...props
 }: SliderPrimitive.Root.Props) {
   const _values = Array.isArray(value)
@@ -71,10 +73,17 @@ function Slider({
             style={{ touchAction: "none" }}
           />
         </SliderPrimitive.Track>
+        {/* The accessible control is the visually-hidden `input[type=range]` that
+            Base UI renders inside each Thumb, and it gets an auto-generated id.
+            `Slider.Root` puts our `id` on its own `div[role=group]`, so a caller's
+            `<label htmlFor>` never reaches the input — the name has to arrive as
+            `aria-label` / `aria-labelledby` forwarded down to the Thumb. */}
         {Array.from({ length: _values.length }, (_, index) => (
           <SliderPrimitive.Thumb
             data-slot="slider-thumb"
             key={index}
+            aria-label={ariaLabel}
+            aria-labelledby={ariaLabelledBy}
             className="relative block size-3.5 shrink-0 cursor-pointer touch-none rounded-full border-0 bg-gradient-to-b from-slate-300 via-slate-400 to-slate-500 shadow-none transition-[box-shadow,transform] select-none after:absolute after:-inset-2 hover:shadow-[0_0_12px_rgba(255,255,255,0.25)] focus-visible:shadow-[0_0_0_2px_rgba(255,255,255,0.35)] focus-visible:outline-hidden active:cursor-grabbing active:scale-95 disabled:cursor-not-allowed disabled:pointer-events-none disabled:opacity-50"
             style={{ touchAction: "none" }}
             onPointerDown={capturePointer}

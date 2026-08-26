@@ -78,6 +78,7 @@ export function sanitizeEffectSettings(raw: unknown): EffectSettings | null {
     showCellLayout: asBool(s.showCellLayout, false),
     textureEnabled: asBool(s.textureEnabled, true),
     textureOpacity: clampNum(s.textureOpacity, 0, 1, 1),
+    halftoneAmount: clampNum(s.halftoneAmount, 0, 100, 0),
   }
 }
 

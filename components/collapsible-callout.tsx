@@ -80,7 +80,7 @@ export function CollapsibleCallout({
         </span>
         <span className="absolute top-1/2 right-4 z-10 flex -translate-y-1/2 items-center gap-3">
           {enabled && (
-            <span className="text-[10px] font-normal uppercase leading-none tracking-[0.16em] text-sky-700">
+            <span className="text-[10px] font-normal uppercase leading-none tracking-[0.16em] text-sky-400">
               {enabledLabel}
             </span>
           )}

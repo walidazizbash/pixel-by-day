@@ -49,6 +49,7 @@ function makeSettings(overrides: Partial<EffectSettings> = {}): EffectSettings {
     showCellLayout: false,
     textureEnabled: false,
     textureOpacity: 1,
+    halftoneAmount: 0,
     ...overrides,
   }
 }

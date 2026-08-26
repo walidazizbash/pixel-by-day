@@ -79,6 +79,17 @@ function textureSettingsFrom(
 type UseAppWorkersOptions = {
   settings: EffectSettings
   imageSrc: string | null
+  /**
+   * Suspend settings-driven rendering — set while the History preview modal is open,
+   * where the live controls track the previewed snapshot but the canvas underneath is
+   * hidden behind an opaque overlay, so every render would be thrown away unseen.
+   *
+   * Only *settings* changes are suspended. A new `imageSrc` still renders, since that
+   * path has to decode and upload a source bitmap either way. Clearing this flag
+   * re-runs the render effect, so whatever the settings drifted to while suspended is
+   * reconciled with exactly one job.
+   */
+  paused?: boolean
   /** Draw a finished composite frame to the live canvas. */
   onPreviewFrame: (width: number, height: number, bitmap: ImageBitmap) => void
   /** Draw the raw source while the first worker job is pending. */
@@ -98,6 +109,7 @@ type UseAppWorkersResult = {
 export function useAppWorkers({
   settings,
   imageSrc,
+  paused = false,
   onPreviewFrame,
   onSourcePreview,
 }: UseAppWorkersOptions): UseAppWorkersResult {
@@ -217,6 +229,13 @@ export function useAppWorkers({
   }, [dispatchWorkerRender])
 
   const schedulePhase3Only = useCallback(() => {
+    // A full regen queued in this same commit already renders Phase 3 from the fresh
+    // Phase 2 frame. Queuing a texture-only job on top would take the higher jobId and
+    // invalidate that render when it lands, leaving stale Phase 2 pixels under new grain.
+    // Relies on the render effect below being declared before the texture effect, so its
+    // `scheduleRegen` has already set this flag by the time we get here.
+    if (pendingDispatchRef.current) return
+
     pendingPhase3Ref.current = true
     if (phase3RafRef.current !== null) return
 
@@ -389,10 +408,22 @@ export function useAppWorkers({
     }
   }, [dispatchComposite, handlePhase2Result])
 
+  /**
+   * Phase 1+2 render on any settings change.
+   *
+   * MUST stay declared before the texture-only effect below — `schedulePhase3Only`
+   * defers to the `pendingDispatchRef` flag that `scheduleRegen` sets here.
+   *
+   * `paused` is a dependency, not just a guard: clearing it re-runs this effect, which
+   * is what reconciles the canvas with however far the settings drifted while suspended.
+   * That single job covers Phase 3 too, so the texture effect has nothing left to do.
+   */
   useEffect(() => {
     if (!sourceBitmapRef.current || !workerRef.current) return
+    if (paused) return
     scheduleRegen()
   }, [
+    paused,
     settings.seed,
     settings.noiseScale,
     settings.noiseSpread,
@@ -407,6 +438,7 @@ export function useAppWorkers({
     settings.weightSurreal,
     settings.weightPixelate,
     settings.weightOriginal,
+    settings.halftoneAmount,
     settings.randomSample,
     settings.edgeClamp,
     settings.smearVertical,
@@ -422,10 +454,16 @@ export function useAppWorkers({
     scheduleRegen,
   ])
 
+  /**
+   * Grain-only refresh, reusing the retained Phase 2 frame. Declared after the render
+   * effect on purpose — see the ordering note there.
+   */
   useEffect(() => {
     if (!sourceBitmapRef.current || !phase2BitmapRef.current) return
+    if (paused) return
     schedulePhase3Only()
   }, [
+    paused,
     settings.textureEnabled,
     settings.textureOpacity,
     schedulePhase3Only,
@@ -507,6 +545,13 @@ export function useAppWorkers({
       } catch {
         // Ignore decode failures; user can re-upload.
       }
+    }
+    image.onerror = () => {
+      if (cancelled) return
+      // Dead/revoked blob URL (e.g. a stale history thumbnail) — leave the
+      // worker's source cleared rather than stuck mid-swap with no bitmaps.
+      console.error("[pixel-by-day] Failed to load source image; it may be a revoked blob URL")
+      workerRef.current?.postMessage({ type: "clearSource" })
     }
     image.src = imageSrc
 

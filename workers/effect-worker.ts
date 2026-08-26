@@ -21,6 +21,8 @@ import { sanitizeEffectSettings } from "@/lib/validate-settings"
 const DITHER_SCALE = 2
 const PIXELATE_SIZE = 4
 const PIXELATE_COLOR_STEPS = 4
+/** Halftone dot-grid sub-cell size, in pixels, within a Cell's own bounds. */
+const HALFTONE_DOT_SIZE = 6
 
 const BAYER_MATRIX = [
   0, 128, 32, 160, 8, 136, 40, 168, 192, 64, 224, 96, 200, 72, 232, 104, 48,
@@ -145,7 +147,9 @@ function chooseEffect(randomVal: number, settings: EffectSettings): EffectName {
   const wInvert = settings.weightInvert
   const wSurreal = settings.weightSurreal
   const wPixelate = settings.weightPixelate
-  const totalWeight = wOriginal + wDither + wInvert + wSurreal + wPixelate
+  const wHalftone = settings.halftoneAmount
+  const totalWeight =
+    wOriginal + wDither + wInvert + wSurreal + wPixelate + wHalftone
 
   if (totalWeight === 0) return "original"
 
@@ -154,12 +158,14 @@ function chooseEffect(randomVal: number, settings: EffectSettings): EffectName {
   const afterDither = afterOriginal + wDither
   const afterInvert = afterDither + wInvert
   const afterSurreal = afterInvert + wSurreal
+  const afterPixelate = afterSurreal + wPixelate
 
   if (target < afterOriginal) return "original"
   if (target < afterDither) return "dither"
   if (target < afterInvert) return "invert"
   if (target < afterSurreal) return "surreal"
-  if (target < afterSurreal + wPixelate) return "pixelate"
+  if (target < afterPixelate) return "pixelate"
+  if (target < afterPixelate + wHalftone) return "halftone"
   return "original"
 }
 
@@ -296,6 +302,66 @@ function applyPixelateGlobal(
   }
 }
 
+/**
+ * Halftone: black dots on white, confined to this Cell's own bounds.
+ * Sub-divides the Cell into a fixed-size dot grid; each dot's radius is
+ * inversely proportional to that sub-cell's average source luminance
+ * (darker → larger dot, up to half the sub-cell size so dots can touch).
+ */
+function applyHalftoneGlobal(
+  data: Uint8ClampedArray,
+  fullWidth: number,
+  cellX: number,
+  cellY: number,
+  width: number,
+  height: number
+) {
+  const dotSize = HALFTONE_DOT_SIZE
+  const maxRadius = dotSize / 2
+  const cellRight = cellX + width
+  const cellBottom = cellY + height
+
+  for (let gy = cellY; gy < cellBottom; gy += dotSize) {
+    const gh = Math.min(dotSize, cellBottom - gy)
+    for (let gx = cellX; gx < cellRight; gx += dotSize) {
+      const gw = Math.min(dotSize, cellRight - gx)
+
+      let sum = 0
+      let count = 0
+      for (let y = 0; y < gh; y++) {
+        const row = (gy + y) * fullWidth
+        for (let x = 0; x < gw; x++) {
+          const i = (row + gx + x) * 4
+          sum += 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2]
+          count++
+        }
+      }
+      if (count === 0) continue
+
+      const lum = sum / count / 255
+      const radius = (1 - lum) * maxRadius
+      const radiusSq = radius * radius
+      const cx = gx + gw / 2
+      const cy = gy + gh / 2
+
+      for (let y = 0; y < gh; y++) {
+        const py = gy + y
+        const dy = py + 0.5 - cy
+        const row = py * fullWidth
+        for (let x = 0; x < gw; x++) {
+          const px = gx + x
+          const dx = px + 0.5 - cx
+          const i = (row + px) * 4
+          const v = dx * dx + dy * dy <= radiusSq ? 0 : 255
+          data[i] = v
+          data[i + 1] = v
+          data[i + 2] = v
+        }
+      }
+    }
+  }
+}
+
 function applyEffectGlobal(
   data: Uint8ClampedArray,
   fullWidth: number,
@@ -322,6 +388,8 @@ function applyEffectGlobal(
       width,
       height
     )
+  } else if (effect === "halftone") {
+    applyHalftoneGlobal(data, fullWidth, cellX, cellY, width, height)
   }
 }
 

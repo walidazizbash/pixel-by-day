@@ -58,6 +58,7 @@ function baseSettings(
     showCellLayout: false,
     textureEnabled: true,
     textureOpacity: 1,
+    halftoneAmount: 0,
     ...overrides,
   }
 }

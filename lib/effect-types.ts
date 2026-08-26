@@ -12,6 +12,7 @@ export type EffectName =
   | "invert"
   | "surreal"
   | "pixelate"
+  | "halftone"
   | "original"
 
 /** One smear style: independent enable + 0–100 strength (composite-time only). */
@@ -86,6 +87,8 @@ export type EffectSettings = {
   textureEnabled: boolean
   /** Phase 3: grain blend strength (0–1). */
   textureOpacity: number
+  /** UI 0–100 relative weight for halftone assignment (higher = more Cells get it). */
+  halftoneAmount: number
 }
 
 /** Settings subset consumed by the Phase 3 composite worker. */
