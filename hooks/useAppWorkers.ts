@@ -7,12 +7,10 @@ import type {
   EffectSettings,
   EffectWorkerOutMessage,
 } from "@/lib/effect-types"
+import { MAX_DECODE_EDGE, MAX_DECODE_PIXELS } from "@/lib/constants"
 
 /** Max edge length for interactive preview / Phase 2+3 worker buffers. */
 const MAX_PREVIEW_DIMENSION = 1200
-/** Hard reject for pathological source bitmaps. */
-const MAX_DECODE_EDGE = 8192
-const MAX_DECODE_PIXELS = 36_000_000
 
 function releaseBitmap(bitmap: ImageBitmap | null) {
   if (!bitmap) return
@@ -122,6 +120,21 @@ export function useAppWorkers({
   const jobIdRef = useRef(0)
   const pendingDispatchRef = useRef(false)
   const pendingPhase3Ref = useRef(false)
+  /** Effect worker is running a render; do not post another until it settles. */
+  const effectBusyRef = useRef(false)
+  /** Latest settings changed while the effect worker was busy. */
+  const pendingRegenRef = useRef(false)
+  /** Composite worker is running; hold at most one pending Phase 3 job. */
+  const compositeBusyRef = useRef(false)
+  const pendingCompositeRef = useRef<{
+    jobId: number
+    phase2: ImageBitmap
+    settings: EffectSettings
+  } | null>(null)
+  /** Highest jobId posted to the composite worker — never post a lower id after it. */
+  const lastPostedCompositeJobIdRef = useRef(0)
+  /** Highest jobId whose grained frame was drawn — ignore out-of-order results. */
+  const lastShownCompositeJobIdRef = useRef(0)
   /** Last finished preview frame (Phase 2, or Phase 3 if grain is on) — Save uses this. */
   const compositeBitmapRef = useRef<ImageBitmap | null>(null)
   /** Capped preview source (what the effect worker uses for interactive renders). */
@@ -159,6 +172,8 @@ export function useAppWorkers({
         return
       }
 
+      lastPostedCompositeJobIdRef.current = jobId
+      compositeBusyRef.current = true
       worker.postMessage(
         {
           type: "composite",
@@ -172,6 +187,50 @@ export function useAppWorkers({
     []
   )
 
+  const enqueueComposite = useCallback(
+    (jobId: number, phase2: ImageBitmap, effectSettings: EffectSettings) => {
+      if (jobId < lastPostedCompositeJobIdRef.current) {
+        phase2.close()
+        return
+      }
+      if (compositeBusyRef.current) {
+        const prev = pendingCompositeRef.current
+        if (prev) {
+          if (prev.jobId > jobId) {
+            phase2.close()
+            return
+          }
+          prev.phase2.close()
+        }
+        pendingCompositeRef.current = { jobId, phase2, settings: effectSettings }
+        return
+      }
+      dispatchComposite(jobId, phase2, effectSettings)
+    },
+    [dispatchComposite]
+  )
+
+  const flushPendingComposite = useCallback(() => {
+    compositeBusyRef.current = false
+    const pending = pendingCompositeRef.current
+    if (!pending) return
+    pendingCompositeRef.current = null
+
+    if (!settingsRef.current.textureEnabled) {
+      applyWorkerResult(
+        pending.phase2.width,
+        pending.phase2.height,
+        pending.phase2
+      )
+      return
+    }
+    if (pending.jobId < lastPostedCompositeJobIdRef.current) {
+      pending.phase2.close()
+      return
+    }
+    dispatchComposite(pending.jobId, pending.phase2, pending.settings)
+  }, [dispatchComposite])
+
   const handlePhase2Result = useCallback(
     async (
       jobId: number,
@@ -184,31 +243,55 @@ export function useAppWorkers({
         return
       }
 
-      releaseBitmap(phase2BitmapRef.current)
-      try {
-        phase2BitmapRef.current = await createImageBitmap(bitmap)
-      } catch {
-        phase2BitmapRef.current = null
+      // Grain stays on the live canvas until the next Phase 3 frame lands.
+      // Painting Phase 2 here is what flickered the overlay off mid-drag.
+      if (!settingsRef.current.textureEnabled) {
+        onPreviewFrameRef.current(width, height, bitmap)
       }
 
-      const effectSettings = settingsRef.current
-      if (effectSettings.textureEnabled) {
-        dispatchComposite(jobId, bitmap, effectSettings)
+      let clone: ImageBitmap
+      try {
+        clone = await createImageBitmap(bitmap)
+      } catch {
+        bitmap.close()
         return
       }
 
-      applyWorkerResult(width, height, bitmap)
+      const stillCurrent = jobId === jobIdRef.current
+      if (stillCurrent) {
+        releaseBitmap(phase2BitmapRef.current)
+        phase2BitmapRef.current = clone
+      } else {
+        clone.close()
+      }
+
+      if (settingsRef.current.textureEnabled) {
+        enqueueComposite(jobId, bitmap, settingsRef.current)
+        return
+      }
+
+      if (!stillCurrent) {
+        bitmap.close()
+        return
+      }
+
+      releaseBitmap(compositeBitmapRef.current)
+      compositeBitmapRef.current = bitmap
     },
-    [dispatchComposite]
+    [enqueueComposite]
   )
 
   const dispatchWorkerRender = useCallback(() => {
     const worker = workerRef.current
     const source = sourceBitmapRef.current
     const effectSettings = settingsRef.current
-    if (!worker || !source || !effectSettings) return
+    if (!worker || !source || !effectSettings) {
+      effectBusyRef.current = false
+      return
+    }
 
     const jobId = ++jobIdRef.current
+    effectBusyRef.current = true
     worker.postMessage({
       type: "render",
       jobId,
@@ -216,7 +299,18 @@ export function useAppWorkers({
     })
   }, [])
 
+  const flushPendingRegen = useCallback(() => {
+    effectBusyRef.current = false
+    if (!pendingRegenRef.current) return
+    pendingRegenRef.current = false
+    dispatchWorkerRender()
+  }, [dispatchWorkerRender])
+
   const scheduleRegen = useCallback(() => {
+    if (effectBusyRef.current) {
+      pendingRegenRef.current = true
+      return
+    }
     pendingDispatchRef.current = true
     if (dispatchRafRef.current !== null) return
 
@@ -224,6 +318,10 @@ export function useAppWorkers({
       dispatchRafRef.current = null
       if (!pendingDispatchRef.current) return
       pendingDispatchRef.current = false
+      if (effectBusyRef.current) {
+        pendingRegenRef.current = true
+        return
+      }
       dispatchWorkerRender()
     })
   }, [dispatchWorkerRender])
@@ -234,7 +332,9 @@ export function useAppWorkers({
     // invalidate that render when it lands, leaving stale Phase 2 pixels under new grain.
     // Relies on the render effect below being declared before the texture effect, so its
     // `scheduleRegen` has already set this flag by the time we get here.
-    if (pendingDispatchRef.current) return
+    if (pendingDispatchRef.current || pendingRegenRef.current || effectBusyRef.current) {
+      return
+    }
 
     pendingPhase3Ref.current = true
     if (phase3RafRef.current !== null) return
@@ -263,14 +363,14 @@ export function useAppWorkers({
             applyWorkerResult(clone.width, clone.height, clone)
             return
           }
-          dispatchComposite(jobId, clone, effectSettings)
+          enqueueComposite(jobId, clone, effectSettings)
         } catch (err) {
           console.error("[pixel-by-day] Phase 3 refresh failed", err)
           scheduleRegen()
         }
       })()
     })
-  }, [dispatchComposite, scheduleRegen])
+  }, [enqueueComposite, scheduleRegen])
 
   const exportHighResImage = useCallback(() => {
     const fullSource = fullSourceBitmapRef.current
@@ -351,16 +451,21 @@ export function useAppWorkers({
     worker.onmessage = (event: MessageEvent<EffectWorkerOutMessage>) => {
       const msg = event.data
       if (msg.type === "result") {
-        if (msg.jobId !== jobIdRef.current) {
+        if (msg.jobId === jobIdRef.current) {
+          void handlePhase2Result(msg.jobId, msg.width, msg.height, msg.bitmap)
+        } else {
           msg.bitmap.close()
-          return
         }
-        void handlePhase2Result(msg.jobId, msg.width, msg.height, msg.bitmap)
+        flushPendingRegen()
         return
       }
-      if (msg.type === "cancelled") return
+      if (msg.type === "cancelled") {
+        flushPendingRegen()
+        return
+      }
       if (msg.type === "error") {
         console.error("[effect-worker]", msg.message)
+        flushPendingRegen()
         return
       }
     }
@@ -370,16 +475,26 @@ export function useAppWorkers({
     ) => {
       const msg = event.data
       if (msg.type === "result") {
-        if (msg.jobId !== jobIdRef.current) {
+        const grainOn = settingsRef.current.textureEnabled
+        if (
+          !grainOn ||
+          msg.jobId < lastShownCompositeJobIdRef.current
+        ) {
           msg.bitmap.close()
-          return
+        } else {
+          lastShownCompositeJobIdRef.current = msg.jobId
+          applyWorkerResult(msg.width, msg.height, msg.bitmap)
         }
-        applyWorkerResult(msg.width, msg.height, msg.bitmap)
+        flushPendingComposite()
         return
       }
-      if (msg.type === "cancelled") return
+      if (msg.type === "cancelled") {
+        flushPendingComposite()
+        return
+      }
       if (msg.type === "error") {
         console.error("[composite-worker]", msg.message)
+        flushPendingComposite()
         return
       }
     }
@@ -406,7 +521,7 @@ export function useAppWorkers({
       releaseBitmap(fullSourceBitmapRef.current)
       fullSourceBitmapRef.current = null
     }
-  }, [dispatchComposite, handlePhase2Result])
+  }, [dispatchComposite, handlePhase2Result, flushPendingRegen, flushPendingComposite])
 
   /**
    * Phase 1+2 render on any settings change.
@@ -439,15 +554,17 @@ export function useAppWorkers({
     settings.weightPixelate,
     settings.weightOriginal,
     settings.halftoneAmount,
+    settings.weightThermal,
     settings.randomSample,
-    settings.edgeClamp,
     settings.smearVertical,
     settings.smearHorizontal,
-    settings.smearDiagonal,
+    settings.smearDiagonal1,
+    settings.smearDiagonal2,
     settings.smearRecursive,
     settings.verticalWeight,
     settings.horizontalWeight,
-    settings.diagonalWeight,
+    settings.diagonal1Weight,
+    settings.diagonal2Weight,
     settings.recursiveWeight,
     settings.showNoiseMap,
     settings.showCellLayout,
@@ -473,6 +590,11 @@ export function useAppWorkers({
     let cancelled = false
 
     if (!imageSrc) {
+      jobIdRef.current += 1
+      lastPostedCompositeJobIdRef.current = jobIdRef.current
+      lastShownCompositeJobIdRef.current = jobIdRef.current
+      pendingRegenRef.current = false
+      effectBusyRef.current = false
       workerRef.current?.postMessage({ type: "clearSource" })
       releaseBitmap(sourceBitmapRef.current)
       sourceBitmapRef.current = null
@@ -536,6 +658,15 @@ export function useAppWorkers({
         if (cancelled) {
           workerBitmap.close()
           return
+        }
+        jobIdRef.current += 1
+        lastPostedCompositeJobIdRef.current = jobIdRef.current
+        lastShownCompositeJobIdRef.current = jobIdRef.current
+        pendingRegenRef.current = false
+        const pendingComposite = pendingCompositeRef.current
+        if (pendingComposite) {
+          pendingComposite.phase2.close()
+          pendingCompositeRef.current = null
         }
         workerRef.current?.postMessage(
           { type: "setSource", bitmap: workerBitmap },

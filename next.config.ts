@@ -27,6 +27,7 @@ const securityHeaders = [
     key: "X-DNS-Prefetch-Control",
     value: "on",
   },
+  { key: "Cross-Origin-Opener-Policy", value: "same-origin" },
 ]
 
 const nextConfig: NextConfig = {

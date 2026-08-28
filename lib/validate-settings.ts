@@ -29,7 +29,9 @@ function asSubdivisionMode(value: unknown): SubdivisionMode {
 function sanitizeSmear(
   value: unknown,
   fallbackEnabled = false,
-  fallbackAmount = 50
+  fallbackAmount = 0,
+  minAmount = -100,
+  maxAmount = 100
 ): SmearStyleSettings {
   if (!value || typeof value !== "object") {
     return { enabled: fallbackEnabled, amount: fallbackAmount }
@@ -37,7 +39,7 @@ function sanitizeSmear(
   const raw = value as Record<string, unknown>
   return {
     enabled: asBool(raw.enabled, fallbackEnabled),
-    amount: clampNum(raw.amount, 0, 100, fallbackAmount),
+    amount: clampNum(raw.amount, minAmount, maxAmount, fallbackAmount),
   }
 }
 
@@ -57,15 +59,16 @@ export function sanitizeEffectSettings(raw: unknown): EffectSettings | null {
     weightPixelate: clampNum(s.weightPixelate, 0, 100, 0),
     weightOriginal: clampNum(s.weightOriginal, 0, 100, 25),
     randomSample: asBool(s.randomSample, false),
-    edgeClamp: asBool(s.edgeClamp, false),
-    smearVertical: sanitizeSmear(s.smearVertical),
-    smearHorizontal: sanitizeSmear(s.smearHorizontal),
-    smearDiagonal: sanitizeSmear(s.smearDiagonal),
-    smearRecursive: sanitizeSmear(s.smearRecursive),
-    verticalWeight: clampNum(s.verticalWeight, 0, 100, 80),
-    horizontalWeight: clampNum(s.horizontalWeight, 0, 100, 80),
-    diagonalWeight: clampNum(s.diagonalWeight, 0, 100, 80),
-    recursiveWeight: clampNum(s.recursiveWeight, 0, 100, 80),
+    smearVertical: sanitizeSmear(s.smearVertical, false, 25, -100, 100),
+    smearHorizontal: sanitizeSmear(s.smearHorizontal, true, 25, -100, 100),
+    smearDiagonal1: sanitizeSmear(s.smearDiagonal1, false, 25, -100, 100),
+    smearDiagonal2: sanitizeSmear(s.smearDiagonal2, false, 25, -100, 100),
+    smearRecursive: sanitizeSmear(s.smearRecursive, false, 25, 0, 100),
+    verticalWeight: clampNum(s.verticalWeight, 0, 100, 50),
+    horizontalWeight: clampNum(s.horizontalWeight, 0, 100, 50),
+    diagonal1Weight: clampNum(s.diagonal1Weight, 0, 100, 50),
+    diagonal2Weight: clampNum(s.diagonal2Weight, 0, 100, 50),
+    recursiveWeight: clampNum(s.recursiveWeight, 0, 100, 50),
     noiseScale: clampNum(s.noiseScale, 1, 100, 19),
     noiseSpread: clampNum(s.noiseSpread, 0, 100, 50),
     maxCellSize: clampNum(s.maxCellSize, 1, 100, 20) | 0,
@@ -79,6 +82,7 @@ export function sanitizeEffectSettings(raw: unknown): EffectSettings | null {
     textureEnabled: asBool(s.textureEnabled, true),
     textureOpacity: clampNum(s.textureOpacity, 0, 1, 1),
     halftoneAmount: clampNum(s.halftoneAmount, 0, 100, 0),
+    weightThermal: clampNum(s.weightThermal, 0, 100, 0),
   }
 }
 

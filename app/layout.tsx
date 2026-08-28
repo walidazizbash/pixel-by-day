@@ -15,11 +15,8 @@ const geistMono = Geist_Mono({
 
 const siteUrl = getSiteUrl()
 
-const title = "Pixel By Day — Generative Pixel Art & Image Effects"
-const description =
-  "Pixel By Day is a browser-based generative art studio for turning photos into Cell-based mosaics with noise masks, smear styles, effects, and 35mm film grain — rendered live on HTML5 Canvas."
-const socialDescription =
-  "Turn any photo into a generative Cell mosaic with noise, smears, effects, and 35mm grain — entirely in your browser."
+const title = "Pixel By Day | Generative Pixel Effects"
+const description = "Distort your images using abstract pixel effects."
 
 export const viewport: Viewport = {
   width: "device-width",
@@ -57,7 +54,6 @@ export const metadata: Metadata = {
   applicationName: "Pixel By Day",
   category: "design",
   icons: {
-    icon: [{ url: "/favicon.ico", sizes: "any" }],
     apple: [{ url: "/apple-icon", sizes: "180x180", type: "image/png" }],
   },
   appleWebApp: {
@@ -81,7 +77,7 @@ export const metadata: Metadata = {
   },
   openGraph: {
     title,
-    description: socialDescription,
+    description,
     type: "website",
     locale: "en_US",
     siteName: "Pixel By Day",
@@ -98,7 +94,7 @@ export const metadata: Metadata = {
   twitter: {
     card: "summary_large_image",
     title,
-    description: socialDescription,
+    description,
     images: ["/twitter-image"],
   },
   formatDetection: {
@@ -117,6 +113,7 @@ const jsonLd = {
   applicationCategory: "DesignApplication",
   operatingSystem: "Any",
   browserRequirements: "Requires HTML5 Canvas and Web Workers",
+  image: `${siteUrl}/opengraph-image`,
   offers: {
     "@type": "Offer",
     price: "0",

@@ -2,36 +2,38 @@
  * Composite-time smear style family.
  * Does not affect Phase 1 layout or Phase 2 mask decisions.
  *
- * Two engines (selected by settings.edgeClamp):
+ * Snapshot smear: freeze the Cell, sample only that snapshot, clamp
+ * out-of-bounds reads to the Cell edge. Trails never leave the Cell.
  *
- * Edge Clamp ON — stacking-safe snapshot:
- *   Freeze the Cell, read from that snapshot, clamp out-of-bounds samples
- *   to the Cell edge. Caller forces sx/sy to the Cell origin.
+ * Directional assignment is mutually exclusive (`chooseSmear`): at most
+ * one of Vertical / Horizontal / Diagonal per Cell. Recursive is a
+ * second pass (`chooseRecursiveSmear`) with its own 0–100 coverage of
+ * ON Cells, stacked on top of whatever directional smear already ran.
  *
- * Edge Clamp OFF — legacy wet canvas:
- *   Live overlapping blit (read/write the work buffer as pixels cascade).
- *   Amount drives a source-origin shift from cell.sx/sy.
+ * Directional weights are absolute coverage while they sum to ≤ 100
+ * (remainder unsmeared); above 100 they compete relatively.
+ * Recursive weight is always absolute vs 100 (50 = half the ON Cells).
  *
- * Fixed combine order (independent sequential ifs, not exclusive):
- * 1. Vertical
- * 2. Horizontal
- * 3. Diagonal
- * 4. Recursive
- *
- * Each style also runs an independent per-cell weight coin-flip
- * (unique deterministic roll per style — not shared cell.randomVal).
- *
- * All region ops respect rectangular Cell bounds (width × height),
- * including edge-clamped non-square Cells.
+ * Signed amounts (Horizontal / Vertical / Diagonal Down–Up): −100…100, 0 = rest.
+ *   Horizontal: + smear right, − smear left
+ *   Vertical:   + smear down,  − smear up
+ *   Diagonal Down (\\): + bottom-right, − top-left
+ *   Diagonal Up (/):    + top-right, − bottom-left
+ * Recursive stays 0–100.
  */
 
 import type {
   CachedCell,
   EffectSettings,
 } from "@/lib/effect-types"
-import { hash2D } from "@/lib/phase1-floor"
+import {
+  chooseRecursiveSmear,
+  chooseSmear,
+  recursiveSmearRoll,
+  type SmearStyleName,
+} from "@/lib/pipeline"
 
-/** Reused scratch for cell-local ops (snapshot / recursive / clean copy). */
+/** Reused scratch for cell-local ops (snapshot / recursive). */
 let smearScratch: Uint8ClampedArray | null = null
 let smearScratchCap = 0
 
@@ -49,66 +51,30 @@ function clampAmount(amount: number): number {
   return amount
 }
 
-function clampInt(v: number, lo: number, hi: number): number {
+/** Horizontal / Vertical / Diagonal: −100…100, 0 = rest. */
+function clampSignedAmount(amount: number): number {
+  if (amount < -100) return -100
+  if (amount > 100) return 100
+  return amount
+}
+
+function signedSmear(amount: number): { mag: number; sign: number } {
+  const a = clampSignedAmount(amount)
+  if (a === 0) return { mag: 0, sign: 1 }
+  return { mag: Math.abs(a), sign: a < 0 ? -1 : 1 }
+}
+
+function clampFloat(v: number, lo: number, hi: number): number {
   if (v < lo) return lo
   if (v > hi) return hi
   return v
 }
 
-/**
- * Scale a sample-origin shift relative to the Cell origin by pass decay.
- * decay=1 → unchanged; decay=0 → identity (no smear motion).
- */
-function decaySampleOrigin(
-  sx: number,
-  sy: number,
-  originX: number,
-  originY: number,
-  decay: number
-): { sx: number; sy: number } {
-  if (!(decay < 1)) return { sx, sy }
-  if (!(decay > 0)) return { sx: originX, sy: originY }
-  return {
-    sx: originX + Math.round((sx - originX) * decay),
-    sy: originY + Math.round((sy - originY) * decay),
-  }
-}
-
-/** Deterministic 0–1 value for a cell + salt. */
-function cellUnit(
-  cell: CachedCell,
-  seed: number,
-  salt: number
-): number {
-  return hash2D(cell.x + salt * 17, cell.y + salt * 31, seed >>> 0)
-}
-
-/**
- * Unique salts for smear weight coin-flips (distinct from direction salts 101/202).
- * Each style must roll independently so probabilities do not perfectly overlap.
- */
-const SMEAR_WEIGHT_SALT = {
-  vertical: 1001,
-  horizontal: 1002,
-  diagonal: 1003,
-  recursive: 1004,
-} as const
-
-/**
- * Independent coin flip: map a style-specific deterministic roll to 0–100.
- * Apply when roll <= weight. Weight 100 always passes; weight 0 almost never.
- */
-function passesSmearWeight(
-  cell: CachedCell,
-  seed: number,
-  salt: number,
-  weight: number
-): boolean {
-  const w = clampAmount(weight)
-  if (w <= 0) return false
-  if (w >= 100) return true
-  const roll = cellUnit(cell, seed, salt) * 100
-  return roll <= w
+/** Linear 0–1 coverage of the Cell's trailing-edge pull, including Repeat decay. */
+function smearPull(mag: number, maxPull: number, decay: number): number {
+  const t = (mag / 100) * (Number.isFinite(decay) ? Math.max(0, decay) : 1)
+  if (!(t > 0) || maxPull <= 0) return 0
+  return maxPull * t
 }
 
 /** Copy the Cell's current work-buffer pixels into scratch (frozen prior state). */
@@ -134,218 +100,116 @@ function snapshotCell(
   }
 }
 
-/* ─── Safe engine (snapshot / stack) ─────────────────────────────────────── */
+/** Bilinear sample of the Cell snapshot, clamped to the Cell (trailing-edge hold). */
+function sampleScratchBilinear(
+  scratch: Uint8ClampedArray,
+  width: number,
+  height: number,
+  fx: number,
+  fy: number,
+  dest: Uint8ClampedArray,
+  dst: number
+) {
+  const maxX = width - 1
+  const maxY = height - 1
+  const x = clampFloat(fx, 0, maxX)
+  const y = clampFloat(fy, 0, maxY)
+  const x0 = x | 0
+  const y0 = y | 0
+  const x1 = x0 < maxX ? x0 + 1 : maxX
+  const y1 = y0 < maxY ? y0 + 1 : maxY
+  const tx = x - x0
+  const ty = y - y0
+  const i00 = (y0 * width + x0) * 4
+  const i10 = (y0 * width + x1) * 4
+  const i01 = (y1 * width + x0) * 4
+  const i11 = (y1 * width + x1) * 4
+  const a = (1 - tx) * (1 - ty)
+  const b = tx * (1 - ty)
+  const c = (1 - tx) * ty
+  const d = tx * ty
+  dest[dst] = scratch[i00]! * a + scratch[i10]! * b + scratch[i01]! * c + scratch[i11]! * d
+  dest[dst + 1] =
+    scratch[i00 + 1]! * a +
+    scratch[i10 + 1]! * b +
+    scratch[i01 + 1]! * c +
+    scratch[i11 + 1]! * d
+  dest[dst + 2] =
+    scratch[i00 + 2]! * a +
+    scratch[i10 + 2]! * b +
+    scratch[i01 + 2]! * c +
+    scratch[i11 + 2]! * d
+  dest[dst + 3] = 255
+}
 
 /**
- * Directional smear (Edge Clamp ON):
- * Samples only the frozen Cell snapshot; out-of-Cell coords edge-clamp in.
+ * Directional smear from a frozen Cell snapshot with subpixel pull.
+ * `offsetX`/`offsetY` are opposite the visual smear (right → sample left).
+ * Out-of-Cell reads clamp to the trailing edge.
  */
 function blitSmearFromSnapshot(
   data: Uint8ClampedArray,
   scratch: Uint8ClampedArray,
   fullWidth: number,
-  _fullHeight: number,
-  sx: number,
-  sy: number,
-  cell: CachedCell
+  cell: CachedCell,
+  offsetX: number,
+  offsetY: number
 ) {
   const width = cell.width
   const height = cell.height
-  const dx = cell.x
-  const dy = cell.y
-  if (sx === dx && sy === dy) return
+  if (offsetX === 0 && offsetY === 0) return
 
+  for (let row = 0; row < height; row++) {
+    const dstRow = (cell.y + row) * fullWidth + cell.x
+    for (let col = 0; col < width; col++) {
+      sampleScratchBilinear(
+        scratch,
+        width,
+        height,
+        col + offsetX,
+        row + offsetY,
+        data,
+        (dstRow + col) * 4
+      )
+    }
+  }
+}
+
+/**
+ * 45-degree smear. Pull is equal on X and Y; when a sample would leave
+ * the Cell, both axes retract together so the trail never collapses
+ * onto a single axis.
+ */
+function blitDiagonalFromSnapshot(
+  data: Uint8ClampedArray,
+  scratch: Uint8ClampedArray,
+  fullWidth: number,
+  cell: CachedCell,
+  pull: number,
+  sampleSignX: number,
+  sampleSignY: number
+) {
+  const width = cell.width
+  const height = cell.height
   const maxCol = width - 1
   const maxRow = height - 1
+  if (!(pull > 0)) return
 
   for (let row = 0; row < height; row++) {
+    const dstRow = (cell.y + row) * fullWidth + cell.x
     for (let col = 0; col < width; col++) {
-      const srcCol = clampInt(sx + col - dx, 0, maxCol)
-      const srcRow = clampInt(sy + row - dy, 0, maxRow)
-      const tmp = (srcRow * width + srcCol) * 4
-      const dst = ((dy + row) * fullWidth + (dx + col)) * 4
-      data[dst] = scratch[tmp]
-      data[dst + 1] = scratch[tmp + 1]
-      data[dst + 2] = scratch[tmp + 2]
-      data[dst + 3] = scratch[tmp + 3]
-    }
-  }
-}
-
-/** Clamp a W×H source origin so it fits in the image and still overlaps the Cell. */
-function clampSourceOverlappingCell(
-  sx: number,
-  sy: number,
-  cellX: number,
-  cellY: number,
-  width: number,
-  height: number,
-  fullWidth: number,
-  fullHeight: number
-): { sx: number; sy: number } {
-  const maxSx = Math.max(0, fullWidth - width)
-  const maxSy = Math.max(0, fullHeight - height)
-  return {
-    sx: clampInt(
-      sx,
-      Math.max(0, cellX - (width - 1)),
-      Math.min(maxSx, cellX + (width - 1))
-    ),
-    sy: clampInt(
-      sy,
-      Math.max(0, cellY - (height - 1)),
-      Math.min(maxSy, cellY + (height - 1))
-    ),
-  }
-}
-
-/* ─── Feedback engine (legacy live cascade) ──────────────────────────────── */
-
-/** In-place overlapping blit (unsafe self-feedback when src∩dest). */
-function copySampleRegion(
-  data: Uint8ClampedArray,
-  fullWidth: number,
-  sx: number,
-  sy: number,
-  dx: number,
-  dy: number,
-  width: number,
-  height: number
-) {
-  if (sx === dx && sy === dy) return
-  for (let row = 0; row < height; row++) {
-    const srcRow = (sy + row) * fullWidth + sx
-    const dstRow = (dy + row) * fullWidth + dx
-    for (let col = 0; col < width; col++) {
-      const src = (srcRow + col) * 4
-      const dst = (dstRow + col) * 4
-      data[dst] = data[src]
-      data[dst + 1] = data[src + 1]
-      data[dst + 2] = data[src + 2]
-      data[dst + 3] = data[src + 3]
-    }
-  }
-}
-
-/** Clean same-size copy via scratch — no self-smear. */
-function copySampleRegionClean(
-  data: Uint8ClampedArray,
-  fullWidth: number,
-  sx: number,
-  sy: number,
-  dx: number,
-  dy: number,
-  width: number,
-  height: number
-) {
-  if (sx === dx && sy === dy) return
-  const temp = ensureSmearScratch(width * height * 4)
-  for (let row = 0; row < height; row++) {
-    const srcRow = (sy + row) * fullWidth + sx
-    const tmpRow = row * width
-    for (let col = 0; col < width; col++) {
-      const src = (srcRow + col) * 4
-      const tmp = (tmpRow + col) * 4
-      temp[tmp] = data[src]
-      temp[tmp + 1] = data[src + 1]
-      temp[tmp + 2] = data[src + 2]
-      temp[tmp + 3] = data[src + 3]
-    }
-  }
-  for (let row = 0; row < height; row++) {
-    const dstRow = (dy + row) * fullWidth + dx
-    const tmpRow = row * width
-    for (let col = 0; col < width; col++) {
-      const dst = (dstRow + col) * 4
-      const tmp = (tmpRow + col) * 4
-      data[dst] = temp[tmp]
-      data[dst + 1] = temp[tmp + 1]
-      data[dst + 2] = temp[tmp + 2]
-      data[dst + 3] = temp[tmp + 3]
-    }
-  }
-}
-
-function clampSampleOrigin(
-  sx: number,
-  sy: number,
-  width: number,
-  height: number,
-  fullWidth: number,
-  fullHeight: number
-): { sx: number; sy: number } {
-  const maxSx = Math.max(0, fullWidth - width)
-  const maxSy = Math.max(0, fullHeight - height)
-  return {
-    sx: clampInt(sx, 0, maxSx),
-    sy: clampInt(sy, 0, maxSy),
-  }
-}
-
-/** Amount 0 baseline (feedback): clean sample → Cell. */
-function copyCellBaselineClean(
-  data: Uint8ClampedArray,
-  fullWidth: number,
-  fullHeight: number,
-  cell: CachedCell
-) {
-  const width = cell.width
-  const height = cell.height
-  if (width < 1 || height < 1) return
-  const clamped = clampSampleOrigin(
-    cell.sx,
-    cell.sy,
-    width,
-    height,
-    fullWidth,
-    fullHeight
-  )
-  copySampleRegionClean(
-    data,
-    fullWidth,
-    clamped.sx,
-    clamped.sy,
-    cell.x,
-    cell.y,
-    width,
-    height
-  )
-}
-
-/** Horizontal in-place blit with column-major scan for sideways feedback. */
-function copySampleRegionHorizontal(
-  data: Uint8ClampedArray,
-  fullWidth: number,
-  sx: number,
-  sy: number,
-  dx: number,
-  dy: number,
-  width: number,
-  height: number,
-  rightToLeft: boolean
-) {
-  if (sx === dx && sy === dy) return
-  if (rightToLeft) {
-    for (let col = width - 1; col >= 0; col--) {
-      for (let row = 0; row < height; row++) {
-        const src = ((sy + row) * fullWidth + (sx + col)) * 4
-        const dst = ((dy + row) * fullWidth + (dx + col)) * 4
-        data[dst] = data[src]
-        data[dst + 1] = data[src + 1]
-        data[dst + 2] = data[src + 2]
-        data[dst + 3] = data[src + 3]
-      }
-    }
-  } else {
-    for (let col = 0; col < width; col++) {
-      for (let row = 0; row < height; row++) {
-        const src = ((sy + row) * fullWidth + (sx + col)) * 4
-        const dst = ((dy + row) * fullWidth + (dx + col)) * 4
-        data[dst] = data[src]
-        data[dst + 1] = data[src + 1]
-        data[dst + 2] = data[src + 2]
-        data[dst + 3] = data[src + 3]
-      }
+      const roomX = sampleSignX < 0 ? col : maxCol - col
+      const roomY = sampleSignY < 0 ? row : maxRow - row
+      const p = Math.min(pull, roomX, roomY)
+      sampleScratchBilinear(
+        scratch,
+        width,
+        height,
+        col + sampleSignX * p,
+        row + sampleSignY * p,
+        data,
+        (dstRow + col) * 4
+      )
     }
   }
 }
@@ -353,409 +217,218 @@ function copySampleRegionHorizontal(
 /* ─── Style implementations ──────────────────────────────────────────────── */
 
 function applyVerticalSmear(
-  data: Uint8ClampedArray,
+  dest: Uint8ClampedArray,
+  source: Uint8ClampedArray,
   fullWidth: number,
-  fullHeight: number,
   cell: CachedCell,
   amount: number,
-  edgeClamp: boolean,
   decay: number
 ) {
   const width = cell.width
   const height = cell.height
   if (width < 1 || height < 1) return
 
-  // Floor at 2 when enabled so the toggle feels immediately responsive.
-  // OFF bypasses this function entirely via applySmearStyles.
-  const amountClamped = Math.max(2, clampAmount(amount))
-
-  if (!edgeClamp) {
-    let sx = cell.sx
-    let sy = cell.sy
-
-    const enhance = amountClamped / 100
-    const maxUp = Math.max(0, Math.min(height - 1, cell.y))
-    const targetSy = cell.y - Math.floor(maxUp * (0.35 + 0.65 * enhance))
-    const targetSx = cell.x
-    sx = Math.round(sx + (targetSx - sx) * enhance)
-    sy = Math.round(sy + (targetSy - sy) * enhance)
-
-    const clamped = clampSampleOrigin(
-      sx,
-      sy,
-      width,
-      height,
-      fullWidth,
-      fullHeight
-    )
-    ;({ sx, sy } = decaySampleOrigin(
-      clamped.sx,
-      clamped.sy,
-      cell.x,
-      cell.y,
-      decay
-    ))
-
-    const passes = 1 + Math.floor(enhance * 3)
-    for (let p = 0; p < passes; p++) {
-      copySampleRegion(
-        data,
-        fullWidth,
-        sx,
-        sy,
-        cell.x,
-        cell.y,
-        width,
-        height
-      )
-    }
-    return
-  }
-
-  const enhance = amountClamped / 100
-  const maxUp = Math.max(0, Math.min(height - 1, cell.y))
-  const targetSy = cell.y - Math.floor(maxUp * (0.35 + 0.65 * enhance))
-  let clamped = clampSourceOverlappingCell(
-    cell.x,
-    Math.round(cell.y + (targetSy - cell.y) * enhance),
-    cell.x,
-    cell.y,
-    width,
-    height,
-    fullWidth,
-    fullHeight
-  )
-  clamped = decaySampleOrigin(clamped.sx, clamped.sy, cell.x, cell.y, decay)
-  if (clamped.sx === cell.x && clamped.sy === cell.y) return
+  const { mag, sign } = signedSmear(amount)
+  if (mag === 0) return
+  const smearDown = sign > 0
+  const pull = smearPull(mag, height - 1, decay)
+  if (!(pull > 0)) return
 
   const scratch = ensureSmearScratch(width * height * 4)
-  snapshotCell(data, fullWidth, cell, scratch)
-
-  const passes = 1 + Math.floor(enhance * 3)
-  for (let p = 0; p < passes; p++) {
-    blitSmearFromSnapshot(
-      data,
-      scratch,
-      fullWidth,
-      fullHeight,
-      clamped.sx,
-      clamped.sy,
-      cell
-    )
-    if (p + 1 < passes) snapshotCell(data, fullWidth, cell, scratch)
-  }
+  snapshotCell(source, fullWidth, cell, scratch)
+  blitSmearFromSnapshot(
+    dest,
+    scratch,
+    fullWidth,
+    cell,
+    0,
+    smearDown ? -pull : pull
+  )
 }
 
 function applyHorizontalSmear(
-  data: Uint8ClampedArray,
+  dest: Uint8ClampedArray,
+  source: Uint8ClampedArray,
   fullWidth: number,
-  fullHeight: number,
   cell: CachedCell,
   amount: number,
-  seed: number,
-  edgeClamp: boolean,
   decay: number
 ) {
   const width = cell.width
   const height = cell.height
-  if (width < 2 || height < 1) return
+  if (width < 1 || height < 1) return
 
-  // Floor at 2 when enabled so the toggle feels immediately responsive.
-  // OFF bypasses this function entirely via applySmearStyles.
-  const amountClamped = Math.max(2, clampAmount(amount))
-  const rightToLeft = cellUnit(cell, seed, 101) >= 0.5
-
-  if (!edgeClamp) {
-    let sx = cell.sx
-    let sy = cell.sy
-
-    const enhance = amountClamped / 100
-    const maxSide = Math.max(
-      0,
-      Math.min(width - 1, rightToLeft ? fullWidth - cell.x - width : cell.x)
-    )
-    const pull = Math.floor(maxSide * (0.35 + 0.65 * enhance))
-    const targetSx = rightToLeft ? cell.x + pull : cell.x - pull
-    const targetSy = cell.y
-    sx = Math.round(sx + (targetSx - sx) * enhance)
-    sy = Math.round(sy + (targetSy - sy) * enhance)
-
-    const clamped = clampSampleOrigin(
-      sx,
-      sy,
-      width,
-      height,
-      fullWidth,
-      fullHeight
-    )
-    ;({ sx, sy } = decaySampleOrigin(
-      clamped.sx,
-      clamped.sy,
-      cell.x,
-      cell.y,
-      decay
-    ))
-
-    const passes = 1 + Math.floor(enhance * 3)
-    for (let p = 0; p < passes; p++) {
-      copySampleRegionHorizontal(
-        data,
-        fullWidth,
-        sx,
-        sy,
-        cell.x,
-        cell.y,
-        width,
-        height,
-        rightToLeft
-      )
-    }
-    return
-  }
-
-  const enhance = amountClamped / 100
-  const maxSide = Math.max(
-    0,
-    Math.min(width - 1, rightToLeft ? fullWidth - cell.x - width : cell.x)
-  )
-  const pull = Math.floor(maxSide * (0.35 + 0.65 * enhance))
-  const targetSx = rightToLeft ? cell.x + pull : cell.x - pull
-  let clamped = clampSourceOverlappingCell(
-    Math.round(cell.x + (targetSx - cell.x) * enhance),
-    cell.y,
-    cell.x,
-    cell.y,
-    width,
-    height,
-    fullWidth,
-    fullHeight
-  )
-  clamped = decaySampleOrigin(clamped.sx, clamped.sy, cell.x, cell.y, decay)
-  if (clamped.sx === cell.x && clamped.sy === cell.y) return
+  const { mag, sign } = signedSmear(amount)
+  if (mag === 0) return
+  const smearRight = sign > 0
+  const pull = smearPull(mag, width - 1, decay)
+  if (!(pull > 0)) return
 
   const scratch = ensureSmearScratch(width * height * 4)
-  snapshotCell(data, fullWidth, cell, scratch)
-
-  const passes = 1 + Math.floor(enhance * 3)
-  for (let p = 0; p < passes; p++) {
-    blitSmearFromSnapshot(
-      data,
-      scratch,
-      fullWidth,
-      fullHeight,
-      clamped.sx,
-      clamped.sy,
-      cell
-    )
-    if (p + 1 < passes) snapshotCell(data, fullWidth, cell, scratch)
-  }
+  snapshotCell(source, fullWidth, cell, scratch)
+  blitSmearFromSnapshot(
+    dest,
+    scratch,
+    fullWidth,
+    cell,
+    smearRight ? -pull : pull,
+    0
+  )
 }
 
 function applyDiagonalSmear(
-  data: Uint8ClampedArray,
+  dest: Uint8ClampedArray,
+  source: Uint8ClampedArray,
   fullWidth: number,
-  fullHeight: number,
   cell: CachedCell,
   amount: number,
-  seed: number,
-  edgeClamp: boolean,
-  decay: number
+  decay: number,
+  axis: 1 | 2
 ) {
   const width = cell.width
   const height = cell.height
   if (width < 2 || height < 2) return
 
-  // UI 0–100 maps to effective 3–100 (slider 0 = old amount 3).
-  // OFF bypasses this function entirely via applySmearStyles.
-  const amountClamped = 3 + clampAmount(amount) * 0.97
-  const dir = (cellUnit(cell, seed, 202) * 4) | 0
-  const signX = dir === 0 || dir === 2 ? -1 : 1
-  const signY = dir === 0 || dir === 1 ? -1 : 1
-
-  if (!edgeClamp) {
-    let sx = cell.sx
-    let sy = cell.sy
-
-    const enhance = amountClamped / 100
-    const pullT = 0.35 + 0.65 * enhance
-    const maxX =
-      signX < 0
-        ? Math.min(width - 1, cell.x)
-        : Math.min(width - 1, Math.max(0, fullWidth - cell.x - width))
-    const maxY =
-      signY < 0
-        ? Math.min(height - 1, cell.y)
-        : Math.min(height - 1, Math.max(0, fullHeight - cell.y - height))
-    const ox = Math.floor(maxX * pullT)
-    const oy = Math.floor(maxY * pullT)
-    const targetSx = cell.x + signX * ox
-    const targetSy = cell.y + signY * oy
-    sx = Math.round(sx + (targetSx - sx) * enhance)
-    sy = Math.round(sy + (targetSy - sy) * enhance)
-
-    const clamped = clampSampleOrigin(
-      sx,
-      sy,
-      width,
-      height,
-      fullWidth,
-      fullHeight
-    )
-    ;({ sx, sy } = decaySampleOrigin(
-      clamped.sx,
-      clamped.sy,
-      cell.x,
-      cell.y,
-      decay
-    ))
-
-    const passes = 1 + Math.floor(enhance * 3)
-    const xForward = signX < 0
-    const yForward = signY < 0
-
-    for (let p = 0; p < passes; p++) {
-      if (yForward) {
-        for (let row = 0; row < height; row++) {
-          if (xForward) {
-            for (let col = 0; col < width; col++) {
-              const src = ((sy + row) * fullWidth + (sx + col)) * 4
-              const dst = ((cell.y + row) * fullWidth + (cell.x + col)) * 4
-              data[dst] = data[src]
-              data[dst + 1] = data[src + 1]
-              data[dst + 2] = data[src + 2]
-              data[dst + 3] = data[src + 3]
-            }
-          } else {
-            for (let col = width - 1; col >= 0; col--) {
-              const src = ((sy + row) * fullWidth + (sx + col)) * 4
-              const dst = ((cell.y + row) * fullWidth + (cell.x + col)) * 4
-              data[dst] = data[src]
-              data[dst + 1] = data[src + 1]
-              data[dst + 2] = data[src + 2]
-              data[dst + 3] = data[src + 3]
-            }
-          }
-        }
-      } else {
-        for (let row = height - 1; row >= 0; row--) {
-          if (xForward) {
-            for (let col = 0; col < width; col++) {
-              const src = ((sy + row) * fullWidth + (sx + col)) * 4
-              const dst = ((cell.y + row) * fullWidth + (cell.x + col)) * 4
-              data[dst] = data[src]
-              data[dst + 1] = data[src + 1]
-              data[dst + 2] = data[src + 2]
-              data[dst + 3] = data[src + 3]
-            }
-          } else {
-            for (let col = width - 1; col >= 0; col--) {
-              const src = ((sy + row) * fullWidth + (sx + col)) * 4
-              const dst = ((cell.y + row) * fullWidth + (cell.x + col)) * 4
-              data[dst] = data[src]
-              data[dst + 1] = data[src + 1]
-              data[dst + 2] = data[src + 2]
-              data[dst + 3] = data[src + 3]
-            }
-          }
-        }
-      }
-    }
-    return
-  }
-
-  const enhance = amountClamped / 100
-  const pullT = 0.2 + 0.45 * enhance
-  const ox = Math.max(1, Math.floor((width - 1) * pullT))
-  const oy = Math.max(1, Math.floor((height - 1) * pullT))
-  let clamped = clampSourceOverlappingCell(
-    cell.x + signX * ox,
-    cell.y + signY * oy,
-    cell.x,
-    cell.y,
-    width,
-    height,
-    fullWidth,
-    fullHeight
-  )
-  clamped = decaySampleOrigin(clamped.sx, clamped.sy, cell.x, cell.y, decay)
-  if (clamped.sx === cell.x && clamped.sy === cell.y) return
+  const { mag, sign } = signedSmear(amount)
+  if (mag === 0) return
+  const smearX = sign
+  const smearY = axis === 1 ? sign : -sign
+  const sampleX = -smearX
+  const sampleY = -smearY
+  const pull = smearPull(mag, Math.min(width - 1, height - 1), decay)
+  if (!(pull > 0)) return
 
   const scratch = ensureSmearScratch(width * height * 4)
-  snapshotCell(data, fullWidth, cell, scratch)
-
-  const passes = 1 + Math.floor(enhance * 3)
-  for (let p = 0; p < passes; p++) {
-    blitSmearFromSnapshot(
-      data,
-      scratch,
-      fullWidth,
-      fullHeight,
-      clamped.sx,
-      clamped.sy,
-      cell
-    )
-    if (p + 1 < passes) snapshotCell(data, fullWidth, cell, scratch)
-  }
+  snapshotCell(source, fullWidth, cell, scratch)
+  blitDiagonalFromSnapshot(dest, scratch, fullWidth, cell, pull, sampleX, sampleY)
 }
 
-/** Nested scale-copy tunnel inside the Cell (uses scratch of current pixels). */
+/** Nested scale-copy tunnel inside the Cell (one bilinear pass, continuous inset). */
 function applyRecursiveSmear(
-  data: Uint8ClampedArray,
+  dest: Uint8ClampedArray,
+  source: Uint8ClampedArray,
   fullWidth: number,
-  fullHeight: number,
   cell: CachedCell,
   amount: number,
-  edgeClamp: boolean,
   decay: number
 ) {
   const width = cell.width
   const height = cell.height
-  if (width < 1 || height < 1) return
-
-  const amountClamped = clampAmount(amount)
-  const smear = (amountClamped / 100) * decay
-  if (smear <= 0) {
-    if (!edgeClamp) {
-      copyCellBaselineClean(data, fullWidth, fullHeight, cell)
-    }
-    return
-  }
   if (width < 4 || height < 4) return
 
-  const passes = 1 + Math.floor(smear * 4)
+  const smear =
+    (clampAmount(amount) / 100) *
+    (Number.isFinite(decay) ? Math.max(0, decay) : 1)
+  if (!(smear > 0)) return
+
+  const insetX = smear * width * 0.14
+  const insetY = smear * height * 0.14
+  const innerLeft = insetX
+  const innerTop = insetY
+  const innerW = width - insetX * 2
+  const innerH = height - insetY * 2
+  if (innerW < 2 || innerH < 2) return
+
   const scratch = ensureSmearScratch(width * height * 4)
+  snapshotCell(source, fullWidth, cell, scratch)
 
-  for (let p = 0; p < passes; p++) {
-    snapshotCell(data, fullWidth, cell, scratch)
-
-    const scale = 0.72 - p * 0.04 * smear
-    const innerW = Math.max(2, Math.floor(width * scale))
-    const innerH = Math.max(2, Math.floor(height * scale))
-    const ox = ((width - innerW) / 2) | 0
-    const oy = ((height - innerH) / 2) | 0
-
-    for (let row = 0; row < innerH; row++) {
-      const srcY = Math.min(height - 1, ((row * height) / innerH) | 0)
-      const dstY = cell.y + oy + row
-      for (let col = 0; col < innerW; col++) {
-        const srcX = Math.min(width - 1, ((col * width) / innerW) | 0)
-        const src = (srcY * width + srcX) * 4
-        const dst = (dstY * fullWidth + (cell.x + ox + col)) * 4
-        data[dst] = scratch[src]
-        data[dst + 1] = scratch[src + 1]
-        data[dst + 2] = scratch[src + 2]
-        data[dst + 3] = scratch[src + 3]
-      }
+  const srcMaxX = width - 1
+  const srcMaxY = height - 1
+  for (let row = 0; row < height; row++) {
+    if (row + 0.5 < innerTop || row + 0.5 > innerTop + innerH) continue
+    const v = ((row + 0.5 - innerTop) / innerH) * srcMaxY
+    const dstRow = (cell.y + row) * fullWidth + cell.x
+    for (let col = 0; col < width; col++) {
+      if (col + 0.5 < innerLeft || col + 0.5 > innerLeft + innerW) continue
+      const u = ((col + 0.5 - innerLeft) / innerW) * srcMaxX
+      sampleScratchBilinear(
+        scratch,
+        width,
+        height,
+        u,
+        v,
+        dest,
+        (dstRow + col) * 4
+      )
     }
   }
 }
 
 /**
- * Apply all enabled smear styles to one ON Cell, cumulatively.
- * Caller must already have seeded the Cell's pixels in `data`.
- * Independent sequential ifs — never if/else if between styles.
- * Each style also needs its own weight coin-flip to pass.
- * `decay` scales smear shift intensity only (not weight probabilities).
+ * Apply exactly one smear style to an already-seeded ON Cell.
+ * `decay` scales smear shift intensity only (not assignment).
+ */
+function applySmearStyle(
+  data: Uint8ClampedArray,
+  fullWidth: number,
+  _fullHeight: number,
+  cell: CachedCell,
+  settings: EffectSettings,
+  style: SmearStyleName,
+  decay = 1,
+  source: Uint8ClampedArray = data
+) {
+  const smearDecay = Number.isFinite(decay) ? Math.max(0, decay) : 1
+
+  if (style === "vertical") {
+    applyVerticalSmear(
+      data,
+      source,
+      fullWidth,
+      cell,
+      settings.smearVertical.amount,
+      smearDecay
+    )
+    return
+  }
+  if (style === "horizontal") {
+    applyHorizontalSmear(
+      data,
+      source,
+      fullWidth,
+      cell,
+      settings.smearHorizontal.amount,
+      smearDecay
+    )
+    return
+  }
+  if (style === "diagonal1") {
+    applyDiagonalSmear(
+      data,
+      source,
+      fullWidth,
+      cell,
+      settings.smearDiagonal1.amount,
+      smearDecay,
+      1
+    )
+    return
+  }
+  if (style === "diagonal2") {
+    applyDiagonalSmear(
+      data,
+      source,
+      fullWidth,
+      cell,
+      settings.smearDiagonal2.amount,
+      smearDecay,
+      2
+    )
+    return
+  }
+  applyRecursiveSmear(
+    data,
+    source,
+    fullWidth,
+    cell,
+    settings.smearRecursive.amount,
+    smearDecay
+  )
+}
+
+/**
+ * Apply directional smear (at most one), then Recursive on top when assigned.
+ * Caller must already have seeded the Cell from its Color Master in `data`.
  */
 export function applySmearStyles(
   data: Uint8ClampedArray,
@@ -763,88 +436,34 @@ export function applySmearStyles(
   fullHeight: number,
   cell: CachedCell,
   settings: EffectSettings,
-  decay = 1
+  decay = 1,
+  source: Uint8ClampedArray = data
 ) {
-  const seed = settings.seed >>> 0
-  const edgeClamp = settings.edgeClamp
-  const smearDecay = Number.isFinite(decay) ? Math.max(0, decay) : 1
-
-  if (
-    settings.smearVertical.enabled &&
-    passesSmearWeight(
-      cell,
-      seed,
-      SMEAR_WEIGHT_SALT.vertical,
-      settings.verticalWeight
-    )
-  ) {
-    applyVerticalSmear(
+  const style = chooseSmear(cell.randomVal, settings)
+  if (style) {
+    applySmearStyle(
       data,
       fullWidth,
       fullHeight,
       cell,
-      settings.smearVertical.amount,
-      edgeClamp,
-      smearDecay
+      settings,
+      style,
+      decay,
+      source
     )
   }
   if (
-    settings.smearHorizontal.enabled &&
-    passesSmearWeight(
-      cell,
-      seed,
-      SMEAR_WEIGHT_SALT.horizontal,
-      settings.horizontalWeight
-    )
+    chooseRecursiveSmear(recursiveSmearRoll(cell.randomVal), settings)
   ) {
-    applyHorizontalSmear(
+    applySmearStyle(
       data,
       fullWidth,
       fullHeight,
       cell,
-      settings.smearHorizontal.amount,
-      seed,
-      edgeClamp,
-      smearDecay
-    )
-  }
-  if (
-    settings.smearDiagonal.enabled &&
-    passesSmearWeight(
-      cell,
-      seed,
-      SMEAR_WEIGHT_SALT.diagonal,
-      settings.diagonalWeight
-    )
-  ) {
-    applyDiagonalSmear(
-      data,
-      fullWidth,
-      fullHeight,
-      cell,
-      settings.smearDiagonal.amount,
-      seed,
-      edgeClamp,
-      smearDecay
-    )
-  }
-  if (
-    settings.smearRecursive.enabled &&
-    passesSmearWeight(
-      cell,
-      seed,
-      SMEAR_WEIGHT_SALT.recursive,
-      settings.recursiveWeight
-    )
-  ) {
-    applyRecursiveSmear(
-      data,
-      fullWidth,
-      fullHeight,
-      cell,
-      settings.smearRecursive.amount,
-      edgeClamp,
-      smearDecay
+      settings,
+      "recursive",
+      decay,
+      data
     )
   }
 }

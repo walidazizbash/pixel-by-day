@@ -11,6 +11,7 @@ import type {
   SmearStyleSettings,
   SubdivisionMode,
 } from "@/lib/effect-types"
+import { MAX_DECODE_EDGE, MAX_DECODE_PIXELS } from "@/lib/constants"
 import { useAppWorkers } from "@/hooks/useAppWorkers"
 import { cn } from "@/lib/utils"
 
@@ -21,9 +22,6 @@ const ALLOWED_IMAGE_TYPES = new Set([
   "image/gif",
 ])
 const MAX_UPLOAD_BYTES = 40 * 1024 * 1024
-/** Reject pathological decode sizes before they enter the worker pipeline. */
-const MAX_DECODE_EDGE = 8192
-const MAX_DECODE_PIXELS = 36_000_000
 
 function sliderValue(value: number | readonly number[], fallback = 0) {
   const raw = Array.isArray(value) ? value[0] : value
@@ -67,8 +65,8 @@ const RANDOM_RANGES = {
   weightSurreal: { min: 20, max: 70 },
   weightPixelate: { min: 20, max: 70 },
   halftoneAmount: { min: 0, max: 70, zeroChance: 0.5 },
+  weightThermal: { min: 0, max: 70, zeroChance: 0.5 },
   randomSampleChance: 0.35,
-  edgeClampChance: 0.4,
   subdivisionModeFrontierChance: 0.5,
 } as const
 
@@ -88,6 +86,13 @@ function randomSmearAmount() {
   const { min, max, zeroChance } = RANDOM_RANGES.smearAmount
   if (Math.random() < zeroChance) return 0
   return randInt(min, max)
+}
+
+/** Horizontal / Vertical / Diagonal: signed amount, 0 is rest. */
+function randomSignedSmearAmount() {
+  const mag = randomSmearAmount()
+  if (mag === 0) return 0
+  return Math.random() < 0.5 ? -mag : mag
 }
 
 function defaultSmear(enabled: boolean, amount = 50): SmearStyleSettings {
@@ -118,30 +123,69 @@ const HISTORY_THUMBNAIL_WIDTH = 150
 /** Pixels the History column scrolls per chevron press. */
 const HISTORY_SCROLL_STEP = 200
 
+/**
+ * Keep at most `MAX_VISUAL_HISTORY` snapshots, plus the one currently open in
+ * the preview modal if it would otherwise fall off the list. The extra slot is
+ * released when the modal closes (`pinnedId` omitted).
+ */
+function capVisualHistory(
+  items: HistorySnapshot[],
+  pinnedId?: string
+): HistorySnapshot[] {
+  const capped = items.slice(0, MAX_VISUAL_HISTORY)
+  if (!pinnedId) return capped
+  const pinned = items.find((snap) => snap.id === pinnedId)
+  if (!pinned || capped.some((snap) => snap.id === pinned.id)) return capped
+  return [...capped, pinned]
+}
+
+/**
+ * Release a source-image blob URL once no holder references it. A source blob can be held
+ * by the live `imageSrc` and by any number of History snapshots at once, so both holders
+ * must be checked — revoking one still in use is what produced the `net::ERR_FILE_NOT_FOUND`
+ * crash when a stale thumbnail tried to reuse it.
+ *
+ * Callers pass the holder they are currently rewriting; the other is read from its ref.
+ * The caller dropping `imageSrc` must omit `liveImageSrc`, because the ref still holds the
+ * outgoing URL at that point and would wrongly veto the revoke.
+ */
+function releaseSourceBlob(
+  url: string | null | undefined,
+  holders: { liveImageSrc?: string | null; history: HistorySnapshot[] }
+) {
+  if (!url?.startsWith("blob:")) return
+  if (holders.liveImageSrc === url) return
+  if (holders.history.some((snap) => snap.imageSrc === url)) return
+  URL.revokeObjectURL(url)
+}
+
 function cloneEffectSettings(settings: EffectSettings): EffectSettings {
   return {
     ...settings,
     smearVertical: { ...settings.smearVertical },
     smearHorizontal: { ...settings.smearHorizontal },
-    smearDiagonal: { ...settings.smearDiagonal },
+    smearDiagonal1: { ...settings.smearDiagonal1 },
+    smearDiagonal2: { ...settings.smearDiagonal2 },
     smearRecursive: { ...settings.smearRecursive },
   }
 }
 
 /** Default Amount values for Smear reset buttons (UI slider only). */
 const SMEAR_AMOUNT_DEFAULTS = {
-  vertical: 0,
-  horizontal: 0,
-  diagonal: 0,
-  recursive: 20,
+  vertical: 25,
+  horizontal: 25,
+  diagonal1: 25,
+  diagonal2: 25,
+  recursive: 25,
 } as const
 
-/** Default Weight values for Smear probability (independent coin flips). */
+/** Default Weight values for Smear (base-100 coverage; 50 = half of ON Cells when alone). */
 const SMEAR_WEIGHT_DEFAULTS = {
-  vertical: 80,
-  horizontal: 80,
-  diagonal: 80,
-  recursive: 80,
+  vertical: 50,
+  horizontal: 50,
+  diagonal1: 50,
+  diagonal2: 50,
+  recursive: 50,
 } as const
 
 /** Default values for all other control sliders. */
@@ -160,6 +204,7 @@ const CONTROL_DEFAULTS = {
   passes: 1,
   rate: 50,
   halftoneAmount: 0,
+  weightThermal: 0,
 } as const
 
 /** Default global seed (matches initial page state). */
@@ -174,14 +219,15 @@ function buildDefaultEffectSettings(): EffectSettings {
     weightPixelate: CONTROL_DEFAULTS.weightPixelate,
     weightOriginal: CONTROL_DEFAULTS.weightOriginal,
     randomSample: false,
-    edgeClamp: false,
     smearVertical: defaultSmear(false, SMEAR_AMOUNT_DEFAULTS.vertical),
     smearHorizontal: defaultSmear(true, SMEAR_AMOUNT_DEFAULTS.horizontal),
-    smearDiagonal: defaultSmear(false, SMEAR_AMOUNT_DEFAULTS.diagonal),
+    smearDiagonal1: defaultSmear(false, SMEAR_AMOUNT_DEFAULTS.diagonal1),
+    smearDiagonal2: defaultSmear(false, SMEAR_AMOUNT_DEFAULTS.diagonal2),
     smearRecursive: defaultSmear(false, SMEAR_AMOUNT_DEFAULTS.recursive),
     verticalWeight: SMEAR_WEIGHT_DEFAULTS.vertical,
     horizontalWeight: SMEAR_WEIGHT_DEFAULTS.horizontal,
-    diagonalWeight: SMEAR_WEIGHT_DEFAULTS.diagonal,
+    diagonal1Weight: SMEAR_WEIGHT_DEFAULTS.diagonal1,
+    diagonal2Weight: SMEAR_WEIGHT_DEFAULTS.diagonal2,
     recursiveWeight: SMEAR_WEIGHT_DEFAULTS.recursive,
     noiseScale: CONTROL_DEFAULTS.noiseScale,
     noiseSpread: CONTROL_DEFAULTS.noiseSpread,
@@ -196,6 +242,7 @@ function buildDefaultEffectSettings(): EffectSettings {
     textureEnabled: true,
     textureOpacity: CONTROL_DEFAULTS.textureOpacity,
     halftoneAmount: CONTROL_DEFAULTS.halftoneAmount,
+    weightThermal: CONTROL_DEFAULTS.weightThermal,
   }
 }
 
@@ -215,11 +262,13 @@ function buildDefaultEffectSettings(): EffectSettings {
  *
  *   1. `randomSample: false` → `resolveCellSampleOrigin` returns the Cell's own origin,
  *      and `copyContinuousCellSample` early-returns when source and dest coincide.
- *   2. All six effect weights (five + `halftoneAmount`) at 0 → `chooseEffect` hits its
- *      `totalWeight === 0` guard and returns "original", which `applyEffectGlobal` has
- *      no branch for.
- *   3. All four smears `enabled: false` → each block in `applySmearStyles` short-circuits
- *      on `enabled` before anything else is evaluated.
+ *   2. All seven effect weights (five + `halftoneAmount` + `weightThermal`) at 0 →
+ *      `chooseEffect` has an empty pool; base-100 padding fall-through returns
+ *      "original". `copyContinuousCellSample` then copies the original Color Master
+ *      onto dest, which already holds that master at a matching origin, so pixels
+ *      are unchanged.
+ *   3. All smears `enabled: false` → `chooseSmear` / `chooseRecursiveSmear`
+ *      skip and the smear step is a no-op.
  *
  * Nothing else in the pipeline writes pixels: no global pass follows the Cell loop, and
  * both debug overlays are off. Break any one of the three and a Bake starts re-processing
@@ -250,18 +299,19 @@ function buildNeutralEffectSettings(current: EffectSettings): EffectSettings {
     weightOriginal: 0,
     // Load-bearing: keeps each Cell sampling its own geometry (see note 1 above).
     randomSample: false,
-    edgeClamp: false,
     smearVertical: { enabled: false, amount: 0 },
     smearHorizontal: { enabled: false, amount: 0 },
-    smearDiagonal: { enabled: false, amount: 0 },
+    smearDiagonal1: { enabled: false, amount: 0 },
+    smearDiagonal2: { enabled: false, amount: 0 },
     smearRecursive: { enabled: false, amount: 0 },
-    // Smear Weights go back to their defaults rather than 0. They are per-Cell
-    // probabilities, not intensities, so a 0 here would leave every smear parked at
-    // "never fires" the moment the user switches one back on. Inert while baking:
-    // `applySmearStyles` short-circuits on `enabled` before any weight is rolled.
+    // Smear Weights go back to their defaults rather than 0. At the default
+    // of 50 they cover half the ON Cells when a style is switched on alone;
+    // when several are on they still compete as shares of max(100, sum).
+    // Inert while baking: no smear runs when every style is disabled.
     verticalWeight: SMEAR_WEIGHT_DEFAULTS.vertical,
     horizontalWeight: SMEAR_WEIGHT_DEFAULTS.horizontal,
-    diagonalWeight: SMEAR_WEIGHT_DEFAULTS.diagonal,
+    diagonal1Weight: SMEAR_WEIGHT_DEFAULTS.diagonal1,
+    diagonal2Weight: SMEAR_WEIGHT_DEFAULTS.diagonal2,
     recursiveWeight: SMEAR_WEIGHT_DEFAULTS.recursive,
     // Noise Mask callout — carried over.
     noiseScale: current.noiseScale,
@@ -284,6 +334,43 @@ function buildNeutralEffectSettings(current: EffectSettings): EffectSettings {
     textureEnabled: current.textureEnabled,
     textureOpacity: current.textureOpacity,
     halftoneAmount: 0,
+    weightThermal: 0,
+  }
+}
+
+/**
+ * Toolbar Reset: zero every effect, turn smears off, restore Cell Pattern / Noise Mask
+ * defaults, and switch Random Sample off. Grain (and seed / Repeat) stay on the live
+ * values.
+ */
+function buildToolbarResetSettings(current: EffectSettings): EffectSettings {
+  return {
+    ...current,
+    weightDither: 0,
+    weightInvert: 0,
+    weightSurreal: 0,
+    weightPixelate: 0,
+    weightOriginal: 0,
+    halftoneAmount: 0,
+    weightThermal: 0,
+    randomSample: false,
+    smearVertical: { enabled: false, amount: 0 },
+    smearHorizontal: { enabled: false, amount: 0 },
+    smearDiagonal1: { enabled: false, amount: 0 },
+    smearDiagonal2: { enabled: false, amount: 0 },
+    smearRecursive: { enabled: false, amount: 0 },
+    verticalWeight: SMEAR_WEIGHT_DEFAULTS.vertical,
+    horizontalWeight: SMEAR_WEIGHT_DEFAULTS.horizontal,
+    diagonal1Weight: SMEAR_WEIGHT_DEFAULTS.diagonal1,
+    diagonal2Weight: SMEAR_WEIGHT_DEFAULTS.diagonal2,
+    recursiveWeight: SMEAR_WEIGHT_DEFAULTS.recursive,
+    subdivisionLoops: CONTROL_DEFAULTS.subdivisionLoops,
+    subdivisionMode: "frontier",
+    subdivisionRate: CONTROL_DEFAULTS.subdivisionRate,
+    noiseScale: CONTROL_DEFAULTS.noiseScale,
+    noiseSpread: CONTROL_DEFAULTS.noiseSpread,
+    showNoiseMap: false,
+    showCellLayout: false,
   }
 }
 
@@ -339,22 +426,25 @@ function prepareCanvasPreview(
 
 export default function Home() {
   const [imageSrc, setImageSrc] = useState<string | null>(
-    "/images/Portrait_01.webp"
+    "/images/Portrait_02.webp"
   )
   const [seed, setSeed] = useState(DEFAULT_SEED)
   const [isDragging, setIsDragging] = useState(false)
+  const [uploadError, setUploadError] = useState<string | null>(null)
   const [bakeConfirmOpen, setBakeConfirmOpen] = useState(false)
   const [isBaking, setIsBaking] = useState(false)
   const [randomSample, setRandomSample] = useState(false)
-  const [edgeClamp, setEdgeClamp] = useState(false)
   const [smearVertical, setSmearVertical] = useState(() =>
     defaultSmear(false, SMEAR_AMOUNT_DEFAULTS.vertical)
   )
   const [smearHorizontal, setSmearHorizontal] = useState(() =>
     defaultSmear(true, SMEAR_AMOUNT_DEFAULTS.horizontal)
   )
-  const [smearDiagonal, setSmearDiagonal] = useState(() =>
-    defaultSmear(false, SMEAR_AMOUNT_DEFAULTS.diagonal)
+  const [smearDiagonal1, setSmearDiagonal1] = useState(() =>
+    defaultSmear(false, SMEAR_AMOUNT_DEFAULTS.diagonal1)
+  )
+  const [smearDiagonal2, setSmearDiagonal2] = useState(() =>
+    defaultSmear(false, SMEAR_AMOUNT_DEFAULTS.diagonal2)
   )
   const [smearRecursive, setSmearRecursive] = useState(() =>
     defaultSmear(false, SMEAR_AMOUNT_DEFAULTS.recursive)
@@ -365,8 +455,11 @@ export default function Home() {
   const [horizontalWeight, setHorizontalWeight] = useState<number>(
     SMEAR_WEIGHT_DEFAULTS.horizontal
   )
-  const [diagonalWeight, setDiagonalWeight] = useState<number>(
-    SMEAR_WEIGHT_DEFAULTS.diagonal
+  const [diagonal1Weight, setDiagonal1Weight] = useState<number>(
+    SMEAR_WEIGHT_DEFAULTS.diagonal1
+  )
+  const [diagonal2Weight, setDiagonal2Weight] = useState<number>(
+    SMEAR_WEIGHT_DEFAULTS.diagonal2
   )
   const [recursiveWeight, setRecursiveWeight] = useState<number>(
     SMEAR_WEIGHT_DEFAULTS.recursive
@@ -409,6 +502,9 @@ export default function Home() {
   const [halftoneAmount, setHalftoneAmount] = useState<number>(
     CONTROL_DEFAULTS.halftoneAmount
   )
+  const [weightThermal, setWeightThermal] = useState<number>(
+    CONTROL_DEFAULTS.weightThermal
+  )
   const [autoFillHistory, setAutoFillHistory] = useState<EffectSettings[]>(() => [
     cloneEffectSettings(buildDefaultEffectSettings()),
   ])
@@ -433,7 +529,14 @@ export default function Home() {
   const historyScrollRef = useRef<HTMLDivElement>(null)
 
   function scrollHistory(delta: number) {
-    historyScrollRef.current?.scrollBy({ top: delta, behavior: "smooth" })
+    const el = historyScrollRef.current
+    if (!el) return
+    const vertical = el.scrollHeight > el.clientHeight + 1
+    el.scrollBy({
+      top: vertical ? delta : 0,
+      left: vertical ? 0 : delta,
+      behavior: "smooth",
+    })
   }
 
   function seedRandomHistory(base: EffectSettings) {
@@ -449,14 +552,15 @@ export default function Home() {
     weightPixelate,
     weightOriginal,
     randomSample,
-    edgeClamp,
     smearVertical,
     smearHorizontal,
-    smearDiagonal,
+    smearDiagonal1,
+    smearDiagonal2,
     smearRecursive,
     verticalWeight,
     horizontalWeight,
-    diagonalWeight,
+    diagonal1Weight,
+    diagonal2Weight,
     recursiveWeight,
     noiseScale,
     noiseSpread,
@@ -471,6 +575,7 @@ export default function Home() {
     textureEnabled,
     textureOpacity,
     halftoneAmount,
+    weightThermal,
   }
 
   /**
@@ -489,14 +594,15 @@ export default function Home() {
     setNoiseScale(next.noiseScale)
     setNoiseSpread(next.noiseSpread)
     setRandomSample(next.randomSample)
-    setEdgeClamp(next.edgeClamp)
     setSmearVertical({ ...next.smearVertical })
     setSmearHorizontal({ ...next.smearHorizontal })
-    setSmearDiagonal({ ...next.smearDiagonal })
+    setSmearDiagonal1({ ...next.smearDiagonal1 })
+    setSmearDiagonal2({ ...next.smearDiagonal2 })
     setSmearRecursive({ ...next.smearRecursive })
     setVerticalWeight(next.verticalWeight)
     setHorizontalWeight(next.horizontalWeight)
-    setDiagonalWeight(next.diagonalWeight)
+    setDiagonal1Weight(next.diagonal1Weight)
+    setDiagonal2Weight(next.diagonal2Weight)
     setRecursiveWeight(next.recursiveWeight)
     setWeightOriginal(next.weightOriginal)
     setWeightDither(next.weightDither)
@@ -504,6 +610,7 @@ export default function Home() {
     setWeightSurreal(next.weightSurreal)
     setWeightPixelate(next.weightPixelate)
     setHalftoneAmount(next.halftoneAmount)
+    setWeightThermal(next.weightThermal)
   }, [])
 
   /** Apply every field of a snapshot, including Phase 3 + debug overlays. */
@@ -521,9 +628,10 @@ export default function Home() {
   /* eslint-disable react-hooks/purity -- randomization is intentional here; only ever
      invoked from the Random button's click handler, never during render. */
   function buildRandomPhase12Settings(base: EffectSettings): EffectSettings {
-    const verticalAmount = randomSmearAmount()
-    const horizontalAmount = randomSmearAmount()
-    const diagonalAmount = randomSmearAmount()
+    const verticalAmount = randomSignedSmearAmount()
+    const horizontalAmount = randomSignedSmearAmount()
+    const diagonal1Amount = randomSignedSmearAmount()
+    const diagonal2Amount = randomSignedSmearAmount()
     const recursiveAmount = randomSmearAmount()
     const R = RANDOM_RANGES
     const enableWhenZero = R.smearEnabledWhenZero
@@ -540,18 +648,21 @@ export default function Home() {
       noiseScale: randInt(R.noiseScale.min, R.noiseScale.max),
       noiseSpread: randInt(R.noiseSpread.min, R.noiseSpread.max),
       randomSample: Math.random() < R.randomSampleChance,
-      edgeClamp: Math.random() < R.edgeClampChance,
       smearVertical: {
-        enabled: verticalAmount > 0 || Math.random() < enableWhenZero,
+        enabled: verticalAmount !== 0 || Math.random() < enableWhenZero,
         amount: verticalAmount,
       },
       smearHorizontal: {
-        enabled: horizontalAmount > 0 || Math.random() < enableWhenZero,
+        enabled: horizontalAmount !== 0 || Math.random() < enableWhenZero,
         amount: horizontalAmount,
       },
-      smearDiagonal: {
-        enabled: diagonalAmount > 0 || Math.random() < enableWhenZero,
-        amount: diagonalAmount,
+      smearDiagonal1: {
+        enabled: diagonal1Amount !== 0 || Math.random() < enableWhenZero,
+        amount: diagonal1Amount,
+      },
+      smearDiagonal2: {
+        enabled: diagonal2Amount !== 0 || Math.random() < enableWhenZero,
+        amount: diagonal2Amount,
       },
       smearRecursive: {
         enabled: recursiveAmount > 0 || Math.random() < enableWhenZero,
@@ -559,7 +670,8 @@ export default function Home() {
       },
       verticalWeight: randInt(R.smearWeight.min, R.smearWeight.max),
       horizontalWeight: randInt(R.smearWeight.min, R.smearWeight.max),
-      diagonalWeight: randInt(R.smearWeight.min, R.smearWeight.max),
+      diagonal1Weight: randInt(R.smearWeight.min, R.smearWeight.max),
+      diagonal2Weight: randInt(R.smearWeight.min, R.smearWeight.max),
       recursiveWeight: randInt(R.smearWeight.min, R.smearWeight.max),
       weightOriginal: randInt(R.weightOriginal.min, R.weightOriginal.max),
       weightDither: randInt(R.weightDither.min, R.weightDither.max),
@@ -570,6 +682,10 @@ export default function Home() {
         Math.random() < R.halftoneAmount.zeroChance
           ? 0
           : randInt(R.halftoneAmount.min, R.halftoneAmount.max),
+      weightThermal:
+        Math.random() < R.weightThermal.zeroChance
+          ? 0
+          : randInt(R.weightThermal.min, R.weightThermal.max),
       // Phase 3 preserved from base
       textureEnabled: base.textureEnabled,
       textureOpacity: base.textureOpacity,
@@ -613,11 +729,11 @@ export default function Home() {
 
   function processFile(file: File) {
     if (!isAllowedImageFile(file)) {
-      alert("Please upload a JPEG, PNG, WebP, or GIF image.")
+      setUploadError("Please upload a JPEG, PNG, WebP, or GIF image.")
       return
     }
     if (file.size > MAX_UPLOAD_BYTES) {
-      alert("File is too large. Please upload an image under 40MB.")
+      setUploadError("File is too large. Please upload an image under 40MB.")
       return
     }
 
@@ -628,20 +744,21 @@ export default function Home() {
         const pixels = probe.width * probe.height
         probe.close()
         if (edge > MAX_DECODE_EDGE || pixels > MAX_DECODE_PIXELS) {
-          alert(
+          setUploadError(
             "Image dimensions are too large. Please use an image under 8192px on the long edge."
           )
           return
         }
 
         const url = URL.createObjectURL(file)
+        setUploadError(null)
         setImageSrc((prev) => {
           releaseSourceBlob(prev, { history: visualHistoryRef.current })
           return url
         })
         seedRandomHistory(effectSettings)
       } catch {
-        alert("Could not read that image. Please try another file.")
+        setUploadError("Could not read that image. Please try another file.")
       }
     })()
   }
@@ -657,22 +774,27 @@ export default function Home() {
   }
 
   /**
-   * Randomize Phase 1 + Phase 2 only.
-   * Phase 3 (textureEnabled / textureOpacity) and debug overlays are preserved.
-   * Pushes onto the Random history stack (truncating any redo future).
+   * Append snapshots onto the Random undo stack, dropping any redo future and
+   * capping length. Used by Random and Reset so Previous Random can walk back.
    */
-  function handleAutoFill() {
-    const base = effectSettings
-
-    const newSettings = cloneEffectSettings(buildRandomPhase12Settings(base))
+  function commitAutoFillHistory(entries: EffectSettings[]) {
     const truncated = autoFillHistory.slice(0, Math.max(0, historyIndex + 1))
-    let nextHistory = [...truncated, newSettings]
-    // Drop oldest entries if the stack grows past the soft cap.
+    let nextHistory = [...truncated, ...entries]
     if (nextHistory.length > MAX_AUTO_FILL_HISTORY) {
       nextHistory = nextHistory.slice(nextHistory.length - MAX_AUTO_FILL_HISTORY)
     }
     setAutoFillHistory(nextHistory)
     setHistoryIndex(nextHistory.length - 1)
+  }
+
+  /**
+   * Randomize Phase 1 + Phase 2 only.
+   * Phase 3 (textureEnabled / textureOpacity) and debug overlays are preserved.
+   * Pushes onto the Random history stack (truncating any redo future).
+   */
+  function handleAutoFill() {
+    const newSettings = cloneEffectSettings(buildRandomPhase12Settings(effectSettings))
+    commitAutoFillHistory([newSettings])
     applyPhase12Settings(newSettings)
   }
 
@@ -729,18 +851,9 @@ export default function Home() {
         imageSrc: capturedImageSrc,
         effectSettings: capturedSettings,
       }
-      setVisualHistory((prev) => {
-        const combined = [snapshot, ...prev]
-        const nextHistory = combined.slice(0, MAX_VISUAL_HISTORY)
-        combined.slice(MAX_VISUAL_HISTORY).forEach((evicted) => {
-          releaseSourceBlob(evicted.imageSrc, {
-            liveImageSrc: imageSrcRef.current,
-            history: nextHistory,
-          })
-          revokeSnapshotPreview(evicted, previewedId)
-        })
-        return nextHistory
-      })
+      setVisualHistory((prev) =>
+        commitHistory([snapshot, ...prev], previewedId, imageSrcRef.current)
+      )
     }, "image/png")
   }
 
@@ -755,6 +868,31 @@ export default function Home() {
     if (!snapshot.previewSrc || snapshot.id === previewedId) return
     URL.revokeObjectURL(snapshot.previewSrc)
   }
+
+  /**
+   * Apply the History cap and revoke blobs of snapshots that actually left the list.
+   * Pass `pinnedId` while the preview modal is open so Restore still has valid URLs.
+   */
+  const commitHistory = useCallback(
+    (
+      items: HistorySnapshot[],
+      pinnedId: string | undefined,
+      liveImageSrc: string | null | undefined
+    ): HistorySnapshot[] => {
+      const nextHistory = capVisualHistory(items, pinnedId)
+      const keepIds = new Set(nextHistory.map((snap) => snap.id))
+      for (const evicted of items) {
+        if (keepIds.has(evicted.id)) continue
+        releaseSourceBlob(evicted.imageSrc, {
+          liveImageSrc,
+          history: nextHistory,
+        })
+        revokeSnapshotPreview(evicted)
+      }
+      return nextHistory
+    },
+    []
+  )
 
   /** Instantly remove one History thumbnail and free its blobs if nothing else needs them. */
   function handleDeleteHistory(id: string, event: React.MouseEvent) {
@@ -773,7 +911,10 @@ export default function Home() {
         })
         revokeSnapshotPreview(target)
       }
-      return survivors
+      // Recap in case the list was holding an extra pinned preview slot.
+      const stillPreviewing =
+        previewItem?.id === id ? undefined : previewItem?.id
+      return commitHistory(survivors, stillPreviewing, imageSrcRef.current)
     })
   }
 
@@ -784,7 +925,7 @@ export default function Home() {
    * parameters behind the image on screen. The pre-preview state is stashed once, on the
    * way in, and `previewing` is what gates that — see `backupSettings`.
    *
-   * The single entry point into previewing: `handlePreviewKeep` relies on the settings
+   * The single entry point into previewing: `handleRestore` relies on the settings
    * already being live, so nothing else may call `setPreviewItem` with a snapshot.
    */
   function openPreview(snapshot: HistorySnapshot) {
@@ -793,26 +934,23 @@ export default function Home() {
     }
     applyFullEffectSettings(snapshot.effectSettings)
     setPreviewItem(snapshot)
+    // Switching the pin from A to B must evict A if it was only kept as the extra slot.
+    setVisualHistory((prev) =>
+      commitHistory(prev, snapshot.id, imageSrcRef.current)
+    )
   }
 
-  /** Dismiss the preview without keeping it: rewind the controls to the stashed state. */
-  function cancelPreview() {
-    if (backupSettings) {
-      applyFullEffectSettings(backupSettings)
-    }
-    setBackupSettings(null)
-    setPreviewItem(null)
-  }
-
-  /** Keep the previewed snapshot: load its image as the live working state. */
-  function handlePreviewKeep() {
+  /** Restore the previewed snapshot: load its image as the live working state. */
+  function handleRestore() {
     if (!previewItem) return
-    const { imageSrc: keptSrc } = previewItem
+    const { imageSrc: restoredSrc } = previewItem
+    const nextHistory = capVisualHistory(visualHistory)
+    setVisualHistory((prev) => commitHistory(prev, undefined, restoredSrc))
     setImageSrc((prev) => {
-      releaseSourceBlob(prev, { history: visualHistoryRef.current })
-      return keptSrc
+      releaseSourceBlob(prev, { history: nextHistory })
+      return restoredSrc
     })
-    // The snapshot's settings went live back in `openPreview`, so keeping them is just a
+    // The snapshot's settings went live back in `openPreview`, so restoring them is just a
     // matter of dropping the backup — re-applying here would only churn the smear object
     // identities `useAppWorkers` watches and cost a redundant worker render.
     setBackupSettings(null)
@@ -820,34 +958,16 @@ export default function Home() {
   }
 
   /**
-   * Escape dismisses the History preview modal, same as the backdrop or Cancel.
-   * `backupSettings` is in the deps because the restore reads it: it only ever changes in
-   * lockstep with `previewing` today, but listing it keeps the handler correct rather than
-   * dependent on that coupling holding.
-   */
-  useEffect(() => {
-    if (!previewing) return
-    function handleKeyDown(event: KeyboardEvent) {
-      if (event.key !== "Escape") return
-      if (backupSettings) {
-        applyFullEffectSettings(backupSettings)
-      }
-      setBackupSettings(null)
-      setPreviewItem(null)
-    }
-    window.addEventListener("keydown", handleKeyDown)
-    return () => window.removeEventListener("keydown", handleKeyDown)
-  }, [previewing, backupSettings, applyFullEffectSettings])
-
-  /**
-   * Reset every generation control to the app's default starting state — the toolbar's
-   * Reset button, which wants the good-looking defaults back.
-   *
-   * Not what Bake uses: flattening needs a zero state, not a pleasing one. See
-   * `buildNeutralEffectSettings`.
+   * Toolbar Reset: effects and smears off, Cell Pattern / Noise Mask at defaults,
+   * Random Sample off. Grain is left on the live settings.
+   * Pushes the pre-reset state then the reset state onto the Random stack so
+   * Previous Random undoes an accidental click.
    */
   function resetGenerationParameters() {
-    applyFullEffectSettings(buildDefaultEffectSettings())
+    const before = cloneEffectSettings(effectSettings)
+    const after = cloneEffectSettings(buildToolbarResetSettings(effectSettings))
+    commitAutoFillHistory([before, after])
+    applyFullEffectSettings(after)
   }
 
   /** Open the Bake confirmation modal (pre-grain Phase 2 capture on confirm). */
@@ -889,11 +1009,6 @@ export default function Home() {
     }
   }
 
-  /**
-   * Revoke the live blob URL only on unmount — not on every `imageSrc` change.
-   * A `[imageSrc]` dependency would run this cleanup on each transition too,
-   * destroying a blob still held by `visualHistory` for later restoration.
-   */
   /** Mirrors for reads from blob helpers, which must see committed state, not a stale closure. */
   const imageSrcRef = useRef(imageSrc)
   const visualHistoryRef = useRef(visualHistory)
@@ -918,25 +1033,46 @@ export default function Home() {
     }
   }, [])
 
+  /** Dismiss the preview without restoring it: rewind the controls to the stashed state. */
+  const cancelPreview = useCallback(() => {
+    if (backupSettings) {
+      applyFullEffectSettings(backupSettings)
+    }
+    setBackupSettings(null)
+    setPreviewItem(null)
+    setVisualHistory((prev) =>
+      commitHistory(prev, undefined, imageSrcRef.current)
+    )
+  }, [backupSettings, applyFullEffectSettings, commitHistory])
+
   /**
-   * Release a source-image blob URL once no holder references it. A source blob can be held
-   * by the live `imageSrc` and by any number of History snapshots at once, so both holders
-   * must be checked — revoking one still in use is what produced the `net::ERR_FILE_NOT_FOUND`
-   * crash when a stale thumbnail tried to reuse it.
-   *
-   * Callers pass the holder they are currently rewriting; the other is read from its ref.
-   * The caller dropping `imageSrc` must omit `liveImageSrc`, because the ref still holds the
-   * outgoing URL at that point and would wrongly veto the revoke.
+   * Escape dismisses the History preview modal, same as the backdrop or Cancel.
+   * Goes through `cancelPreview` so a snapshot that was only kept as the extra
+   * pinned slot is evicted and its blobs are revoked.
    */
-  function releaseSourceBlob(
-    url: string | null | undefined,
-    holders: { liveImageSrc?: string | null; history: HistorySnapshot[] }
-  ) {
-    if (!url?.startsWith("blob:")) return
-    if (holders.liveImageSrc === url) return
-    if (holders.history.some((snap) => snap.imageSrc === url)) return
-    URL.revokeObjectURL(url)
-  }
+  useEffect(() => {
+    if (!previewing) return
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key !== "Escape") return
+      cancelPreview()
+    }
+    window.addEventListener("keydown", handleKeyDown)
+    return () => window.removeEventListener("keydown", handleKeyDown)
+  }, [previewing, cancelPreview])
+
+  /**
+   * Escape dismisses the Bake confirm dialog, same as Cancel / backdrop.
+   * Ignored while a bake is in flight so the dialog cannot vanish mid-job.
+   */
+  useEffect(() => {
+    if (!bakeConfirmOpen) return
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key !== "Escape") return
+      if (!isBaking) setBakeConfirmOpen(false)
+    }
+    window.addEventListener("keydown", handleKeyDown)
+    return () => window.removeEventListener("keydown", handleKeyDown)
+  }, [bakeConfirmOpen, isBaking])
 
   function handleFileChange(event: React.ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0]
@@ -968,7 +1104,7 @@ export default function Home() {
     setIsDragging(false)
 
     const file = event.dataTransfer.files[0]
-    if (!file || !isAllowedImageFile(file)) return
+    if (!file) return
     processFile(file)
   }
 
@@ -994,9 +1130,11 @@ export default function Home() {
   /**
    * The box the rendered image occupies. Shared by the live canvas pane and the preview
    * overlay so the preview lands on exactly the canvas's footprint — they must stay identical.
+   * No viewport-height cap: a mid-size `max-h-[80vh]` made the image collapse between
+   * mobile and desktop breakpoints, then jump back.
    */
   const canvasBoxClass =
-    "flex h-full max-h-full w-full max-w-[1200px] items-center justify-center overflow-hidden md:max-h-[80vh]"
+    "flex size-full max-w-[1200px] items-center justify-center overflow-hidden"
   const helperText = "font-body text-xs text-slate-400"
   const bodyText = "font-body text-sm font-medium text-slate-200"
   const footerText = "font-footer text-xs text-slate-400"
@@ -1011,7 +1149,7 @@ export default function Home() {
   )
 
   return (
-    <div className="flex h-dvh flex-col overflow-hidden bg-[radial-gradient(ellipse_at_top_left,_var(--tw-gradient-stops))] from-slate-900 via-[#08080a] to-black font-body text-[#f5f5f7] pb-16 md:h-screen">
+    <div className="flex h-dvh flex-col overflow-hidden bg-[radial-gradient(ellipse_at_top_left,_var(--tw-gradient-stops))] from-slate-900 via-[#08080a] to-black font-body text-[#f5f5f7]">
       <div className="flex min-h-0 flex-1 flex-col overflow-hidden lg:flex-row">
         <header className="order-0 flex shrink-0 items-center px-4 py-3 lg:hidden">
           <h1 className={pageTitle}>Pixel By Day</h1>
@@ -1360,7 +1498,8 @@ export default function Home() {
             weightSurreal > 0 ||
             weightDither > 0 ||
             weightOriginal > 0 ||
-            halftoneAmount > 0
+            halftoneAmount > 0 ||
+            weightThermal > 0
           }
         >
             <div className="flex items-center justify-between gap-4">
@@ -1558,6 +1697,42 @@ export default function Home() {
 
             <div className={controlField}>
               <div className="flex items-center gap-1.5">
+                <label htmlFor="weight-thermal" className={controlLabel}>
+                  Thermal
+                </label>
+              </div>
+              <div className={sliderRow}>
+                <Slider
+                  id="weight-thermal"
+                  aria-label="Thermal"
+                  className={sliderTrackClass}
+                  value={[weightThermal]}
+                  min={0}
+                  max={100}
+                  step={1}
+                  onValueChange={(value) =>
+                    setWeightThermal(
+                      sliderValue(value, CONTROL_DEFAULTS.weightThermal)
+                    )
+                  }
+                />
+                <div className="flex shrink-0 items-center gap-0.5">
+                  <span className={sliderValueReadout} aria-hidden="true">
+                    {weightThermal}
+                  </span>
+                  <ResetAmountButton
+                    label="Thermal"
+                    defaultValue={CONTROL_DEFAULTS.weightThermal}
+                    onReset={() =>
+                      setWeightThermal(CONTROL_DEFAULTS.weightThermal)
+                    }
+                  />
+                </div>
+              </div>
+            </div>
+
+            <div className={controlField}>
+              <div className="flex items-center gap-1.5">
                 <label htmlFor="weight-original" className={controlLabel}>
                   Original
                 </label>
@@ -1600,22 +1775,11 @@ export default function Home() {
           enabled={
             smearVertical.enabled ||
             smearHorizontal.enabled ||
-            smearDiagonal.enabled ||
+            smearDiagonal1.enabled ||
+            smearDiagonal2.enabled ||
             smearRecursive.enabled
           }
         >
-          <div className="flex items-center justify-between gap-4 border-b border-white/5 pb-4">
-            <div className="flex items-center gap-1.5">
-              <label htmlFor="edge-clamp" className={controlLabel}>
-                Edge Clamp
-              </label>
-            </div>
-            <Switch
-              id="edge-clamp"
-              checked={edgeClamp}
-              onCheckedChange={setEdgeClamp}
-            />
-          </div>
           {(
             [
               {
@@ -1624,6 +1788,8 @@ export default function Home() {
                 value: smearVertical,
                 set: setSmearVertical,
                 defaultAmount: SMEAR_AMOUNT_DEFAULTS.vertical,
+                minAmount: -100,
+                maxAmount: 100,
                 weight: verticalWeight,
                 setWeight: setVerticalWeight,
                 defaultWeight: SMEAR_WEIGHT_DEFAULTS.vertical,
@@ -1634,19 +1800,35 @@ export default function Home() {
                 value: smearHorizontal,
                 set: setSmearHorizontal,
                 defaultAmount: SMEAR_AMOUNT_DEFAULTS.horizontal,
+                minAmount: -100,
+                maxAmount: 100,
                 weight: horizontalWeight,
                 setWeight: setHorizontalWeight,
                 defaultWeight: SMEAR_WEIGHT_DEFAULTS.horizontal,
               },
               {
-                id: "diagonal",
-                label: "Diagonal",
-                value: smearDiagonal,
-                set: setSmearDiagonal,
-                defaultAmount: SMEAR_AMOUNT_DEFAULTS.diagonal,
-                weight: diagonalWeight,
-                setWeight: setDiagonalWeight,
-                defaultWeight: SMEAR_WEIGHT_DEFAULTS.diagonal,
+                id: "diagonal2",
+                label: "Diagonal Up",
+                value: smearDiagonal2,
+                set: setSmearDiagonal2,
+                defaultAmount: SMEAR_AMOUNT_DEFAULTS.diagonal2,
+                minAmount: -100,
+                maxAmount: 100,
+                weight: diagonal2Weight,
+                setWeight: setDiagonal2Weight,
+                defaultWeight: SMEAR_WEIGHT_DEFAULTS.diagonal2,
+              },
+              {
+                id: "diagonal1",
+                label: "Diagonal Down",
+                value: smearDiagonal1,
+                set: setSmearDiagonal1,
+                defaultAmount: SMEAR_AMOUNT_DEFAULTS.diagonal1,
+                minAmount: -100,
+                maxAmount: 100,
+                weight: diagonal1Weight,
+                setWeight: setDiagonal1Weight,
+                defaultWeight: SMEAR_WEIGHT_DEFAULTS.diagonal1,
               },
               {
                 id: "recursive",
@@ -1654,6 +1836,8 @@ export default function Home() {
                 value: smearRecursive,
                 set: setSmearRecursive,
                 defaultAmount: SMEAR_AMOUNT_DEFAULTS.recursive,
+                minAmount: 0,
+                maxAmount: 100,
                 weight: recursiveWeight,
                 setWeight: setRecursiveWeight,
                 defaultWeight: SMEAR_WEIGHT_DEFAULTS.recursive,
@@ -1693,21 +1877,43 @@ export default function Home() {
                     <div className={controlField}>
                       <span className={helperText}>Amount</span>
                       <div className={sliderRow}>
-                        <Slider
-                          id={`smear-${style.id}-amount`}
-                          aria-label={`${style.label} amount`}
-                          className={sliderTrackClass}
-                          value={[style.value.amount]}
-                          min={0}
-                          max={100}
-                          step={1}
-                          onValueChange={(value) =>
-                            style.set({
-                              ...style.value,
-                              amount: sliderValue(value, style.defaultAmount),
-                            })
-                          }
-                        />
+                        <div
+                          className={cn(
+                            sliderTrackClass,
+                            "relative",
+                            style.minAmount < 0 && "pb-3"
+                          )}
+                        >
+                          <Slider
+                            id={`smear-${style.id}-amount`}
+                            aria-label={`${style.label} amount`}
+                            className="relative z-10 w-full min-w-0"
+                            value={[style.value.amount]}
+                            min={style.minAmount}
+                            max={style.maxAmount}
+                            step={1}
+                            onValueChange={(value) =>
+                              style.set({
+                                ...style.value,
+                                amount: sliderValue(
+                                  value,
+                                  style.defaultAmount
+                                ),
+                              })
+                            }
+                          />
+                          {style.minAmount < 0 ? (
+                            <div
+                              aria-hidden
+                              className="pointer-events-none absolute inset-x-0 top-[7px] z-0 h-0"
+                            >
+                              <span className="absolute left-1/2 top-0 h-2 w-px -translate-x-1/2 -translate-y-1/2 bg-slate-400" />
+                              <span className="absolute left-1/2 top-[8px] -translate-x-1/2 font-footer text-[10px] leading-none tabular-nums text-slate-400">
+                                0
+                              </span>
+                            </div>
+                          ) : null}
+                        </div>
                         <div className="flex shrink-0 items-center gap-0.5">
                           <span
                             className={sliderValueReadout}
@@ -1729,11 +1935,13 @@ export default function Home() {
                       </div>
                     </div>
                     <div className={controlField}>
-                      <span className={helperText}>Weight</span>
+                      <span className={helperText}>
+                        {style.id === "recursive" ? "Coverage" : "Weight"}
+                      </span>
                       <div className={sliderRow}>
                         <Slider
                           id={`smear-${style.id}-weight`}
-                          aria-label={`${style.label} weight`}
+                          aria-label={`${style.label} ${style.id === "recursive" ? "coverage" : "weight"}`}
                           className={sliderTrackClass}
                           value={[style.weight]}
                           min={0}
@@ -1753,7 +1961,7 @@ export default function Home() {
                             {style.weight}
                           </span>
                           <ResetAmountButton
-                            label={`${style.label} weight`}
+                            label={`${style.label} ${style.id === "recursive" ? "coverage" : "weight"}`}
                             defaultValue={style.defaultWeight}
                             onReset={() =>
                               style.setWeight(style.defaultWeight)
@@ -1828,7 +2036,7 @@ export default function Home() {
             </div>
           )}
         </CollapsibleCallout>
-        <p className={cn("px-1 pb-2 text-center text-slate-600 md:hidden", footerText)}>
+        <p className={cn("px-1 pb-2 text-center text-slate-600 lg:hidden", footerText)}>
           Designed and created by{" "}
           <a
             href="https://www.instagram.com/walidazizbash"
@@ -1841,14 +2049,19 @@ export default function Home() {
         </p>
       </aside>
 
-      {/* min-w-0 lets this row shrink to fit; without it the History column overflows
-          off-screen and clicking a thumbnail scrolls the whole layout sideways. */}
-      <div className="order-1 flex w-full min-w-0 flex-1 flex-row gap-2 lg:order-2 lg:gap-6">
-      <main className="flex min-h-[50vh] min-w-0 flex-1 flex-col px-3 pb-3 pt-0 lg:h-auto lg:min-h-0 lg:overflow-hidden lg:p-6">
+      {/*
+        One breakpoint (`lg` / 1024px), mobile-first:
+        - Below lg: canvas stack is a bounded-height row (never 50vh+), history is a
+          horizontal strip, controls take leftover height and always scroll.
+        - lg+: three columns — controls | canvas | history.
+        `min-w-0` lets the canvas column shrink instead of overflowing the history rail.
+      */}
+      <div className="order-1 flex min-h-0 min-w-0 w-full max-lg:h-[min(58dvh,36rem)] max-lg:shrink-0 flex-col lg:order-2 lg:h-full lg:flex-1 lg:flex-row lg:gap-6">
+      <main className="flex min-h-0 min-w-0 flex-1 flex-col px-3 pb-3 pt-0 lg:overflow-hidden lg:p-6">
         <div
           className={cn(
             floatingCard,
-            "flex h-full min-h-0 flex-col gap-0 overflow-hidden p-0 md:min-h-0 md:flex-1"
+            "flex h-full min-h-0 flex-col gap-0 overflow-hidden p-0"
           )}
         >
           <div className="relative flex min-h-0 w-full flex-1 touch-manipulation items-center justify-center overflow-hidden p-2 text-slate-400 sm:p-4 md:p-6">
@@ -1860,6 +2073,8 @@ export default function Home() {
                     never upscales past 1:1. */}
                 <canvas
                   ref={liveCanvasRef}
+                  role="img"
+                  aria-label="Generated mosaic preview"
                   className="block size-full object-scale-down touch-manipulation"
                 />
               </div>
@@ -1886,10 +2101,18 @@ export default function Home() {
                 )}
               </button>
             )}
+            {uploadError && (
+              <p
+                role="alert"
+                className="absolute inset-x-3 bottom-3 z-20 rounded-lg border border-red-500/40 bg-red-950/90 px-3 py-2 text-center text-xs leading-relaxed text-red-100 shadow-lg sm:inset-x-4 sm:bottom-4"
+              >
+                {uploadError}
+              </p>
+            )}
             {previewItem && (
               /* `inset-0` spans this pane's padding box, so repeating its padding here is
                  what makes the preview land on exactly the canvas's box — not double-inset.
-                 Keep/Cancel live down in the toolbar, leaving the image full size here. */
+                 Restore/Cancel live down in the toolbar, leaving the image full size here. */
               <div
                 className="absolute inset-0 z-40 flex items-center justify-center bg-[#08080a] p-2 sm:p-4 md:p-6"
                 onClick={cancelPreview}
@@ -1907,7 +2130,7 @@ export default function Home() {
             )}
           </div>
           <div className="relative flex shrink-0 flex-col items-center gap-2 border-t border-white/10 px-3 py-2 md:gap-3 md:px-6 md:py-4">
-            {/* Keep/Cancel sit on top of the hidden controls, so the toolbar keeps its
+            {/* Restore/Cancel sit on top of the hidden controls, so the toolbar keeps its
                 exact height and the canvas above it never resizes. */}
             {previewing && (
               <div className="absolute inset-0 z-10 flex items-center justify-center gap-4">
@@ -1915,9 +2138,9 @@ export default function Home() {
                   type="button"
                   size="sm"
                   className={cn(toolbarActionButton, "h-8 rounded-full px-6")}
-                  onClick={handlePreviewKeep}
+                  onClick={handleRestore}
                 >
-                  Keep
+                  Restore
                 </Button>
                 <Button
                   type="button"
@@ -2035,7 +2258,6 @@ export default function Home() {
                 previewing && "invisible"
               )}
             >
-              <div className="contents">
                 <Button
                   type="button"
                   size="sm"
@@ -2064,13 +2286,11 @@ export default function Home() {
                   size="sm"
                   className={toolbarActionButton}
                   disabled={!imageSrc}
-                  title="Reset all generation parameters to defaults"
+                  title="Zero effects and smears; restore Cell Pattern and Noise Mask defaults (keeps grain)"
                   onClick={resetGenerationParameters}
                 >
                   Reset
                 </Button>
-              </div>
-              <div className="contents">
                 <Button
                   type="button"
                   size="sm"
@@ -2089,55 +2309,51 @@ export default function Home() {
                 >
                   Save
                 </Button>
-              </div>
             </div>
           </div>
         </div>
       </main>
 
       {visualHistory.length > 0 && (
-      <aside className="flex w-28 shrink-0 flex-col items-center gap-2 py-3 pl-1 pr-3">
+      <aside className="flex w-full shrink-0 flex-row items-center gap-2 px-3 py-2 lg:h-full lg:w-28 lg:flex-col lg:px-0 lg:py-3 lg:pl-1 lg:pr-3">
         <button
           type="button"
-          aria-label="Scroll history up"
+          aria-label="Scroll history backward"
           onClick={() => scrollHistory(-HISTORY_SCROLL_STEP)}
-          className="flex w-full cursor-pointer items-center justify-center p-1 text-gray-300 hover:text-white"
+          className="flex shrink-0 cursor-pointer items-center justify-center p-1 text-gray-300 hover:text-white lg:w-full"
         >
-          <ChevronUp className="h-4 w-4" />
+          <ChevronLeft className="h-4 w-4 lg:hidden" />
+          <ChevronUp className="hidden h-4 w-4 lg:block" />
         </button>
         <div
           ref={historyScrollRef}
-          className="hide-scrollbar flex w-full flex-1 min-h-0 max-h-[calc(100vh-16rem)] flex-col items-center gap-2 overflow-y-auto"
+          className="hide-scrollbar flex min-h-0 w-full flex-1 flex-row items-center gap-2 overflow-x-auto pt-1.5 lg:flex-col lg:overflow-x-hidden lg:overflow-y-auto lg:pt-0"
         >
           {visualHistory.map((snapshot) => (
               <div
                 key={snapshot.id}
-                role="button"
-                tabIndex={0}
-                title="Preview this saved result"
-                onClick={() => openPreview(snapshot)}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter" || event.key === " ") {
-                    event.preventDefault()
-                    openPreview(snapshot)
-                  }
-                }}
-                className="group flex shrink-0 cursor-pointer items-center gap-2 rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-400/40"
+                className="group relative flex shrink-0 items-center rounded-lg lg:gap-2"
               >
-                <div className="aspect-square w-14 shrink-0 overflow-hidden rounded-lg border border-white/10 transition-colors group-hover:border-white/30">
+                <button
+                  type="button"
+                  aria-label="Preview this saved result"
+                  title="Preview this saved result"
+                  onClick={() => openPreview(snapshot)}
+                  className="aspect-square w-14 shrink-0 cursor-pointer overflow-hidden rounded-lg border border-white/10 transition-colors hover:border-white/30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-400/40"
+                >
                   {/* eslint-disable-next-line @next/next/no-img-element -- small local data URL thumbnail, not an optimizable remote asset */}
                   <img
                     src={snapshot.thumbnail}
-                    alt="Saved generation"
+                    alt=""
                     className="h-full w-full object-cover transition-transform duration-150 group-hover:scale-105"
                   />
-                </div>
+                </button>
                 <button
                   type="button"
                   aria-label="Delete this saved result"
                   title="Delete"
                   onClick={(event) => handleDeleteHistory(snapshot.id, event)}
-                  className="flex h-5 w-5 shrink-0 cursor-pointer items-center justify-center rounded-full bg-slate-700/60 text-white shadow-sm hover:bg-slate-600/70"
+                  className="absolute -top-1.5 -right-1.5 z-10 flex h-5 w-5 shrink-0 cursor-pointer items-center justify-center rounded-full bg-red-700 text-white shadow-sm hover:bg-red-800 lg:static lg:top-auto lg:right-auto lg:z-auto"
                 >
                   <X className="size-4" />
                 </button>
@@ -2146,17 +2362,18 @@ export default function Home() {
         </div>
         <button
           type="button"
-          aria-label="Scroll history down"
+          aria-label="Scroll history forward"
           onClick={() => scrollHistory(HISTORY_SCROLL_STEP)}
-          className="flex w-full cursor-pointer items-center justify-center p-1 text-gray-300 hover:text-white"
+          className="flex shrink-0 cursor-pointer items-center justify-center p-1 text-gray-300 hover:text-white lg:w-full"
         >
-          <ChevronDown className="h-4 w-4" />
+          <ChevronRight className="h-4 w-4 lg:hidden" />
+          <ChevronDown className="hidden h-4 w-4 lg:block" />
         </button>
       </aside>
       )}
       </div>
       </div>
-      <footer className={cn("hidden w-full shrink-0 border-t border-white/10 py-3 text-center md:block", footerText)}>
+      <footer className={cn("hidden w-full shrink-0 border-t border-white/10 py-3 text-center lg:block", footerText)}>
         Designed and created by{" "}
         <a
           href="https://www.instagram.com/walidazizbash"

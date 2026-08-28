@@ -47,7 +47,7 @@ const FLOOR_TUNING = {
   largeSpanFrom: 0.55,
 } as const
 
-export type FloorSquare = {
+type FloorSquare = {
   gx: number
   gy: number
   span: number
@@ -58,7 +58,7 @@ type SpanTier = {
   maxSpan: number
 }
 
-export type Phase1GeometryCell = {
+type Phase1GeometryCell = {
   x: number
   y: number
   width: number

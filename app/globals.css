@@ -1,5 +1,4 @@
 @import "tailwindcss";
-@import "tw-animate-css";
 @import "shadcn/tailwind.css";
 
 @custom-variant dark (&:is(.dark *));
@@ -151,14 +150,12 @@
     @apply font-footer;
   }
 
-  /* Mobile editor shell: lock document scroll; panes manage their own overflow */
-  @media (max-width: 767px) {
-    html,
-    body {
-      height: 100%;
-      overflow: hidden;
-      overscroll-behavior: none;
-    }
+  /* Single-screen editor: document never scrolls; panes manage their own overflow. */
+  html,
+  body {
+    height: 100%;
+    overflow: hidden;
+    overscroll-behavior: none;
   }
 
   button:not(:disabled),

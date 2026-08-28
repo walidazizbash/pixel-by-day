@@ -1,9 +1,19 @@
 /// <reference lib="webworker" />
 
+/**
+ * Hybrid Pipeline.
+ *
+ *   setSource → eager persistent Color Masters (pass 0)
+ *   render    → for i in 0..passes-1:
+ *                 layout (cached pass 0; later passes re-layout with seed+i)
+ *                 mask → assign → sample Color Master → smear (decay (rate/100)^i)
+ *                 post-smear textures (dither / halftone / pixelate)
+ *               Passes i>0 use throwaway masters built from the previous frame.
+ */
+
 import type {
   CachedLayout,
   CachedCell,
-  EffectName,
   EffectSettings,
   EffectWorkerInMessage,
   EffectWorkerOutMessage,
@@ -16,40 +26,31 @@ import {
   layoutParamsEqual,
 } from "@/lib/phase1-floor"
 import { applySmearStyles } from "@/lib/smear-styles"
+import { applyTexture } from "@/lib/texture-styles"
 import { sanitizeEffectSettings } from "@/lib/validate-settings"
-
-const DITHER_SCALE = 2
-const PIXELATE_SIZE = 4
-const PIXELATE_COLOR_STEPS = 4
-/** Halftone dot-grid sub-cell size, in pixels, within a Cell's own bounds. */
-const HALFTONE_DOT_SIZE = 6
-
-const BAYER_MATRIX = [
-  0, 128, 32, 160, 8, 136, 40, 168, 192, 64, 224, 96, 200, 72, 232, 104, 48,
-  176, 16, 144, 56, 184, 24, 152, 240, 112, 208, 80, 248, 120, 216, 88, 12,
-  140, 44, 172, 4, 132, 36, 164, 204, 76, 236, 108, 196, 68, 228, 100, 60,
-  188, 28, 156, 52, 180, 20, 148, 252, 124, 220, 92, 244, 116, 212, 84,
-] as const
-
-const SURREAL_R = new Uint8ClampedArray(256)
-const SURREAL_G = new Uint8ClampedArray(256)
-const SURREAL_B = new Uint8ClampedArray(256)
-for (let v = 0; v < 256; v++) {
-  SURREAL_R[v] = Math.sin((v / 255) * Math.PI) * 255
-  SURREAL_G[v] = Math.cos((v / 255) * Math.PI) * 255
-  SURREAL_B[v] = Math.sin((v / 255) * 2 * Math.PI) * 255
-}
+import {
+  buildColorMasters,
+  masterForName,
+  type ColorMasters,
+} from "@/lib/color-masters"
+import {
+  chooseEffect,
+  colorMasterForEffect,
+  isTextureEffect,
+} from "@/lib/pipeline"
+import { THERMAL_DIFFUSE_SCALE } from "@/lib/thermal"
 
 let cachedSource: ImageBitmap | null = null
+let colorMasters: ColorMasters | null = null
 let cachedLayout: CachedLayout | null = null
 let cachedLayoutParams: LayoutParams | null = null
 let activeJobId = 0
 
-/** Reused full-frame work surface — zero per-cell canvas allocations. */
 let workCanvas: OffscreenCanvas | null = null
 let workCtx: OffscreenCanvasRenderingContext2D | null = null
 let workWidth = 0
 let workHeight = 0
+let workImageData: ImageData | null = null
 
 function post(msg: EffectWorkerOutMessage, transfer?: Transferable[]) {
   ;(self as DedicatedWorkerGlobalScope).postMessage(msg, transfer ?? [])
@@ -80,9 +81,34 @@ function isStale(jobId: number) {
   return jobId !== activeJobId
 }
 
+function throwIfStale(jobId?: number) {
+  if (jobId !== undefined && isStale(jobId)) {
+    throw new Error("__cancelled__")
+  }
+}
+
 function clearLayoutCache() {
   cachedLayout = null
   cachedLayoutParams = null
+}
+
+function clearColorMasters() {
+  colorMasters = null
+}
+
+function acquireWorkImageData(
+  ctx: OffscreenCanvasRenderingContext2D,
+  width: number,
+  height: number
+): ImageData {
+  if (
+    !workImageData ||
+    workImageData.width !== width ||
+    workImageData.height !== height
+  ) {
+    workImageData = ctx.createImageData(width, height)
+  }
+  return workImageData
 }
 
 function ensureWorkSurface(width: number, height: number) {
@@ -96,11 +122,69 @@ function ensureWorkSurface(width: number, height: number) {
   return workCtx
 }
 
-// ─── Phase 2: mask sampling (procedural noise) ────────────────────────────────
+/**
+ * Cheap diffusion: downscale the heat field, bilinear-smooth, scale back up.
+ * Used when building a Thermal Color Master (pass 0 eager, later-pass throwaway).
+ */
+function blurHeatField(
+  sharp: Float32Array,
+  width: number,
+  height: number
+): Float32Array {
+  const sw = Math.max(1, Math.round(width * THERMAL_DIFFUSE_SCALE))
+  const sh = Math.max(1, Math.round(height * THERMAL_DIFFUSE_SCALE))
+  const src = new OffscreenCanvas(width, height)
+  const srcCtx = src.getContext("2d")
+  if (!srcCtx) return sharp
 
-type MaskSample = {
-  /** True when the finished cell should receive effects. */
-  on: boolean
+  const img = srcCtx.createImageData(width, height)
+  const px = img.data
+  for (let i = 0, p = 0; i < sharp.length; i++, p += 4) {
+    const g = Math.round(sharp[i]! * 255)
+    px[p] = g
+    px[p + 1] = g
+    px[p + 2] = g
+    px[p + 3] = 255
+  }
+  srcCtx.putImageData(img, 0, 0)
+
+  const small = new OffscreenCanvas(sw, sh)
+  const smallCtx = small.getContext("2d")
+  if (!smallCtx) return sharp
+  smallCtx.imageSmoothingEnabled = true
+  smallCtx.imageSmoothingQuality = "low"
+  smallCtx.drawImage(src, 0, 0, sw, sh)
+
+  const up = new OffscreenCanvas(width, height)
+  const upCtx = up.getContext("2d")
+  if (!upCtx) return sharp
+  upCtx.imageSmoothingEnabled = true
+  upCtx.imageSmoothingQuality = "high"
+  upCtx.drawImage(small, 0, 0, width, height)
+  const out = upCtx.getImageData(0, 0, width, height).data
+  const blurred = new Float32Array(width * height)
+  const inv255 = 1 / 255
+  for (let i = 0, p = 0; i < blurred.length; i++, p += 4) {
+    blurred[i] = out[p]! * inv255
+  }
+  return blurred
+}
+
+function readSourceRgba(
+  bitmap: ImageBitmap,
+  width: number,
+  height: number
+): Uint8ClampedArray {
+  const ctx = ensureWorkSurface(width, height)
+  ctx.drawImage(bitmap, 0, 0, width, height)
+  return new Uint8ClampedArray(ctx.getImageData(0, 0, width, height).data)
+}
+
+function rebuildColorMasters(bitmap: ImageBitmap) {
+  const width = bitmap.width
+  const height = bitmap.height
+  const sourceRgba = readSourceRgba(bitmap, width, height)
+  colorMasters = buildColorMasters(sourceRgba, width, height, blurHeatField)
 }
 
 /** Fixed Phase 2 mask contrast — keeps organic ON/OFF regions sharp. */
@@ -110,18 +194,17 @@ const MASK_NOISE_CONTRAST = 1.5
  * Sample the Phase 2 mask for one structural Cell.
  * Uses the Cell's placement (`cell.x` / `cell.y`) so the mask stays blocky
  * at grid resolution — not continuous per-pixel sampling.
+ * Returns a boolean to avoid per-cell object allocation.
  */
 function sampleCellMask(
   cell: CachedCell,
   settings: EffectSettings,
   baseCellSize: number
-): MaskSample {
+): boolean {
   const scale = Math.max(1, baseCellSize)
-  // Structural Cell center → grid units (blocky mask resolution).
   const gx = (cell.x + cell.width * 0.5) / scale
   const gy = (cell.y + cell.height * 0.5) / scale
 
-  // UI noiseScale is 1–100; map to the internal 0.01–0.5 frequency range.
   const uiScale = Math.max(1, Math.min(100, Number(settings.noiseScale) || 1))
   const internalScale = 0.01 + ((uiScale - 1) / 99) * 0.49
   const v = valueNoise2D(
@@ -129,268 +212,10 @@ function sampleCellMask(
     gy * internalScale,
     settings.seed >>> 0
   )
-  // Bound slightly past scaled noise peaks so extremes are absolute.
   const bound = MASK_NOISE_CONTRAST + 0.01
-  // 0 → +bound (all OFF); 50 → 0; 100 → -bound (all ON)
   const threshold = bound * (1.0 - settings.noiseSpread / 50)
 
-  return {
-    on: v * MASK_NOISE_CONTRAST > threshold,
-  }
-}
-
-// ─── Effect assignment (at composite time — weights can change without relayout) ─
-
-function chooseEffect(randomVal: number, settings: EffectSettings): EffectName {
-  const wOriginal = settings.weightOriginal
-  const wDither = settings.weightDither
-  const wInvert = settings.weightInvert
-  const wSurreal = settings.weightSurreal
-  const wPixelate = settings.weightPixelate
-  const wHalftone = settings.halftoneAmount
-  const totalWeight =
-    wOriginal + wDither + wInvert + wSurreal + wPixelate + wHalftone
-
-  if (totalWeight === 0) return "original"
-
-  const target = randomVal * totalWeight
-  const afterOriginal = wOriginal
-  const afterDither = afterOriginal + wDither
-  const afterInvert = afterDither + wInvert
-  const afterSurreal = afterInvert + wSurreal
-  const afterPixelate = afterSurreal + wPixelate
-
-  if (target < afterOriginal) return "original"
-  if (target < afterDither) return "dither"
-  if (target < afterInvert) return "invert"
-  if (target < afterSurreal) return "surreal"
-  if (target < afterPixelate) return "pixelate"
-  if (target < afterPixelate + wHalftone) return "halftone"
-  return "original"
-}
-
-// ─── Step 4: compositeCells — one global buffer, inline effect math ───────────
-
-function applyDitherGlobal(
-  data: Uint8ClampedArray,
-  fullWidth: number,
-  cellX: number,
-  cellY: number,
-  width: number,
-  height: number
-) {
-  const scale = DITHER_SCALE
-  for (let localY = 0; localY < height; localY++) {
-    const absY = cellY + localY
-    for (let localX = 0; localX < width; localX++) {
-      const absX = cellX + localX
-      const qAbsX = absX - (absX % scale)
-      const qAbsY = absY - (absY % scale)
-      const qLocalX = Math.min(width - 1, Math.max(0, qAbsX - cellX))
-      const qLocalY = Math.min(height - 1, Math.max(0, qAbsY - cellY))
-      const qIndex = ((cellY + qLocalY) * fullWidth + (cellX + qLocalX)) * 4
-
-      const r = data[qIndex]
-      const g = data[qIndex + 1]
-      const b = data[qIndex + 2]
-      const lum = 0.299 * r + 0.587 * g + 0.114 * b
-
-      const scaledX = (absX / scale) | 0
-      const scaledY = (absY / scale) | 0
-      const threshold = BAYER_MATRIX[(scaledY & 7) * 8 + (scaledX & 7)]
-      const v = lum > threshold ? 255 : 0
-
-      const i = (absY * fullWidth + absX) * 4
-      data[i] = v
-      data[i + 1] = v
-      data[i + 2] = v
-    }
-  }
-}
-
-function applyInvertGlobal(
-  data: Uint8ClampedArray,
-  fullWidth: number,
-  cellX: number,
-  cellY: number,
-  width: number,
-  height: number
-) {
-  for (let localY = 0; localY < height; localY++) {
-    const row = (cellY + localY) * fullWidth + cellX
-    for (let localX = 0; localX < width; localX++) {
-      const i = (row + localX) * 4
-      data[i] = 255 - data[i]
-      data[i + 1] = 255 - data[i + 1]
-      data[i + 2] = 255 - data[i + 2]
-    }
-  }
-}
-
-function applySurrealGlobal(
-  data: Uint8ClampedArray,
-  fullWidth: number,
-  cellX: number,
-  cellY: number,
-  width: number,
-  height: number
-) {
-  for (let localY = 0; localY < height; localY++) {
-    const row = (cellY + localY) * fullWidth + cellX
-    for (let localX = 0; localX < width; localX++) {
-      const i = (row + localX) * 4
-      data[i] = SURREAL_R[data[i]]
-      data[i + 1] = SURREAL_G[data[i + 1]]
-      data[i + 2] = SURREAL_B[data[i + 2]]
-    }
-  }
-}
-
-function quantizeChannel(value: number, stepFactor: number): number {
-  return Math.round(Math.round(value / stepFactor) * stepFactor)
-}
-
-function applyPixelateGlobal(
-  data: Uint8ClampedArray,
-  fullWidth: number,
-  fullHeight: number,
-  cellX: number,
-  cellY: number,
-  width: number,
-  height: number
-) {
-  const blockSize = PIXELATE_SIZE
-  const colorSteps = PIXELATE_COLOR_STEPS
-  const stepFactor = 255 / (colorSteps - 1)
-  const cellRight = cellX + width
-  const cellBottom = cellY + height
-
-  const blockStartY = cellY - (cellY % blockSize)
-  for (let blockY = blockStartY; blockY < cellBottom; blockY += blockSize) {
-    const writeEndY = Math.min(blockY + blockSize, cellBottom)
-
-    const blockStartX = cellX - (cellX % blockSize)
-    for (let blockX = blockStartX; blockX < cellRight; blockX += blockSize) {
-      const writeEndX = Math.min(blockX + blockSize, cellRight)
-
-      const centerX = Math.min(
-        fullWidth - 1,
-        Math.max(0, blockX + (blockSize >> 1))
-      )
-      const centerY = Math.min(
-        fullHeight - 1,
-        Math.max(0, blockY + (blockSize >> 1))
-      )
-      const centerIndex = (centerY * fullWidth + centerX) * 4
-
-      const r = quantizeChannel(data[centerIndex], stepFactor)
-      const g = quantizeChannel(data[centerIndex + 1], stepFactor)
-      const b = quantizeChannel(data[centerIndex + 2], stepFactor)
-
-      const writeStartY = Math.max(blockY, cellY)
-      const writeStartX = Math.max(blockX, cellX)
-      for (let y = writeStartY; y < writeEndY; y++) {
-        const row = y * fullWidth
-        for (let x = writeStartX; x < writeEndX; x++) {
-          const i = (row + x) * 4
-          data[i] = r
-          data[i + 1] = g
-          data[i + 2] = b
-        }
-      }
-    }
-  }
-}
-
-/**
- * Halftone: black dots on white, confined to this Cell's own bounds.
- * Sub-divides the Cell into a fixed-size dot grid; each dot's radius is
- * inversely proportional to that sub-cell's average source luminance
- * (darker → larger dot, up to half the sub-cell size so dots can touch).
- */
-function applyHalftoneGlobal(
-  data: Uint8ClampedArray,
-  fullWidth: number,
-  cellX: number,
-  cellY: number,
-  width: number,
-  height: number
-) {
-  const dotSize = HALFTONE_DOT_SIZE
-  const maxRadius = dotSize / 2
-  const cellRight = cellX + width
-  const cellBottom = cellY + height
-
-  for (let gy = cellY; gy < cellBottom; gy += dotSize) {
-    const gh = Math.min(dotSize, cellBottom - gy)
-    for (let gx = cellX; gx < cellRight; gx += dotSize) {
-      const gw = Math.min(dotSize, cellRight - gx)
-
-      let sum = 0
-      let count = 0
-      for (let y = 0; y < gh; y++) {
-        const row = (gy + y) * fullWidth
-        for (let x = 0; x < gw; x++) {
-          const i = (row + gx + x) * 4
-          sum += 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2]
-          count++
-        }
-      }
-      if (count === 0) continue
-
-      const lum = sum / count / 255
-      const radius = (1 - lum) * maxRadius
-      const radiusSq = radius * radius
-      const cx = gx + gw / 2
-      const cy = gy + gh / 2
-
-      for (let y = 0; y < gh; y++) {
-        const py = gy + y
-        const dy = py + 0.5 - cy
-        const row = py * fullWidth
-        for (let x = 0; x < gw; x++) {
-          const px = gx + x
-          const dx = px + 0.5 - cx
-          const i = (row + px) * 4
-          const v = dx * dx + dy * dy <= radiusSq ? 0 : 255
-          data[i] = v
-          data[i + 1] = v
-          data[i + 2] = v
-        }
-      }
-    }
-  }
-}
-
-function applyEffectGlobal(
-  data: Uint8ClampedArray,
-  fullWidth: number,
-  fullHeight: number,
-  effect: EffectName,
-  cellX: number,
-  cellY: number,
-  width: number,
-  height: number
-) {
-  if (effect === "dither") {
-    applyDitherGlobal(data, fullWidth, cellX, cellY, width, height)
-  } else if (effect === "invert") {
-    applyInvertGlobal(data, fullWidth, cellX, cellY, width, height)
-  } else if (effect === "surreal") {
-    applySurrealGlobal(data, fullWidth, cellX, cellY, width, height)
-  } else if (effect === "pixelate") {
-    applyPixelateGlobal(
-      data,
-      fullWidth,
-      fullHeight,
-      cellX,
-      cellY,
-      width,
-      height
-    )
-  } else if (effect === "halftone") {
-    applyHalftoneGlobal(data, fullWidth, cellX, cellY, width, height)
-  }
+  return v * MASK_NOISE_CONTRAST > threshold
 }
 
 function drawCellNoiseMapDebug(
@@ -400,7 +225,6 @@ function drawCellNoiseMapDebug(
   width: number,
   height: number
 ) {
-  // Phase 2 mask as Cell blocks — same sampleCellMask as the real composite.
   ctx.fillStyle = "#000000"
   ctx.fillRect(0, 0, width, height)
 
@@ -413,7 +237,7 @@ function drawCellNoiseMapDebug(
     const w = cell.width
     const h = cell.height
     if (w < 1 || h < 1) continue
-    if (!sampleCellMask(cell, settings, baseCellSize).on) continue
+    if (!sampleCellMask(cell, settings, baseCellSize)) continue
     ctx.fillRect(cell.x, cell.y, w, h)
   }
 }
@@ -441,11 +265,8 @@ function drawCellLayoutDebug(
   }
 }
 
-/**
- * Lock the source sample origin once per Cell.
- * - randomSample on: Phase 1's per-Cell sx/sy, clamped so width×height fits
- * - randomSample off: identity map to the Cell's own geometry
- */
+const sampleOriginScratch = { sampleX: 0, sampleY: 0 }
+
 function resolveCellSampleOrigin(
   cell: CachedCell,
   settings: EffectSettings,
@@ -453,7 +274,9 @@ function resolveCellSampleOrigin(
   fullHeight: number
 ): { sampleX: number; sampleY: number } {
   if (!settings.randomSample) {
-    return { sampleX: cell.x, sampleY: cell.y }
+    sampleOriginScratch.sampleX = cell.x
+    sampleOriginScratch.sampleY = cell.y
+    return sampleOriginScratch
   }
 
   const maxSx = Math.max(0, fullWidth - cell.width)
@@ -464,14 +287,11 @@ function resolveCellSampleOrigin(
   else if (sampleX > maxSx) sampleX = maxSx
   if (sampleY < 0) sampleY = 0
   else if (sampleY > maxSy) sampleY = maxSy
-  return { sampleX, sampleY }
+  sampleOriginScratch.sampleX = sampleX
+  sampleOriginScratch.sampleY = sampleY
+  return sampleOriginScratch
 }
 
-/**
- * Continuous pixel mapping: one unbroken source window → Cell destination.
- * Reads from an immutable source snapshot so earlier Cells cannot pollute
- * later random samples (work-buffer feedback was causing fragmentation).
- */
 function copyContinuousCellSample(
   source: Uint8ClampedArray,
   dest: Uint8ClampedArray,
@@ -484,7 +304,7 @@ function copyContinuousCellSample(
   cellHeight: number
 ) {
   if (cellWidth < 1 || cellHeight < 1) return
-  if (sampleX === destX && sampleY === destY) return
+  if (sampleX === destX && sampleY === destY && source === dest) return
 
   for (let row = 0; row < cellHeight; row++) {
     const srcRow = (sampleY + row) * fullWidth + sampleX
@@ -500,45 +320,40 @@ function copyContinuousCellSample(
   }
 }
 
-/** Normal Phase 2 composite: source → mask → sample → effects. No debug visualization. */
-function drawNormalEffects(
-  ctx: OffscreenCanvasRenderingContext2D,
+/**
+ * Hybrid cell loop: assign → copy Color Master window → smear → texture.
+ * Dest starts as the original master (OFF Cells stay Normal).
+ */
+function applyHybridCells(
+  dest: Uint8ClampedArray,
+  masters: ColorMasters,
   layout: CachedLayout,
   settings: EffectSettings,
   width: number,
   height: number,
-  decay: number
+  decay: number,
+  jobId?: number
 ) {
-  ctx.drawImage(cachedSource!, 0, 0, width, height)
-
-  const imageData = ctx.getImageData(0, 0, width, height)
-  const data = imageData.data
-  // Immutable snapshot of the source pixels — Cell samples must never read
-  // from the mutable work buffer (other Cells may have already written there).
-  const sourcePixels = new Uint8ClampedArray(data)
   const cells = layout.cells
   const baseCellSize = layout.baseCellSize
+  dest.set(masters.original)
 
   for (let i = 0; i < cells.length; i++) {
+    if (jobId !== undefined) throwIfStale(jobId)
     const cell = cells[i]
-    const mask = sampleCellMask(cell, settings, baseCellSize)
+    if (!sampleCellMask(cell, settings, baseCellSize)) continue
 
-    // OFF cells leave the source background untouched.
-    if (!mask.on) continue
-
-    // 1) Lock sample origin once for this Cell (not per-pixel / sub-grid).
+    const effect = chooseEffect(cell.randomVal, settings)
+    const master = masterForName(masters, colorMasterForEffect(effect))
     const { sampleX, sampleY } = resolveCellSampleOrigin(
       cell,
       settings,
       width,
       height
     )
-
-    // 2) Continuous mapping of the full Cell window from the locked origin.
-    //    Exactly once per Cell — smears must not re-read this clean snapshot.
     copyContinuousCellSample(
-      sourcePixels,
-      data,
+      master,
+      dest,
       width,
       sampleX,
       sampleY,
@@ -547,27 +362,10 @@ function drawNormalEffects(
       cell.width,
       cell.height
     )
-
-    // 3) Smears on the Cell's work-buffer pixels.
-    //    Edge Clamp on: identity sx/sy (stacking-safe snapshot engine).
-    //    Edge Clamp off: keep layout sx/sy for amount-driven wet-canvas shift
-    //    (except randomSample, which must not re-read a foreign region).
-    let smearCell: CachedCell
-    if (settings.edgeClamp) {
-      smearCell = { ...cell, sx: cell.x, sy: cell.y }
-    } else if (
-      settings.randomSample &&
-      (sampleX !== cell.x || sampleY !== cell.y)
-    ) {
-      smearCell = { ...cell, sx: cell.x, sy: cell.y }
-    } else {
-      smearCell = cell
-    }
-    applySmearStyles(data, width, height, smearCell, settings, decay)
-    const effect = chooseEffect(cell.randomVal, settings)
-    if (effect !== "original") {
-      applyEffectGlobal(
-        data,
+    applySmearStyles(dest, width, height, cell, settings, decay)
+    if (isTextureEffect(effect)) {
+      applyTexture(
+        dest,
         width,
         height,
         effect,
@@ -577,6 +375,59 @@ function drawNormalEffects(
         cell.height
       )
     }
+  }
+}
+
+/**
+ * Hybrid: layout → mask → Color Master sample → smear → post-smear textures.
+ * Repeats Phases 1+2 for `settings.passes` (1–3). Pass 0 uses persistent masters
+ * and the cached layout. Later passes re-layout with seed+i and never write
+ * those caches.
+ */
+function drawNormalEffects(
+  ctx: OffscreenCanvasRenderingContext2D,
+  layout: CachedLayout,
+  settings: EffectSettings,
+  width: number,
+  height: number,
+  jobId?: number
+) {
+  throwIfStale(jobId)
+  if (!colorMasters) throw new Error("Color Masters missing")
+
+  const passCount = Math.max(1, Math.min(3, settings.passes | 0))
+  const rate = Math.max(0, Math.min(100, Number(settings.rate) || 0))
+  const imageData = acquireWorkImageData(ctx, width, height)
+  const dest = imageData.data
+
+  let passLayout = layout
+  let passMasters: ColorMasters = colorMasters
+
+  for (let i = 0; i < passCount; i++) {
+    throwIfStale(jobId)
+    const passSettings =
+      i > 0 ? { ...settings, seed: settings.seed + i } : settings
+    if (i > 0) {
+      const prevFrame = new Uint8ClampedArray(dest)
+      passMasters = buildColorMasters(
+        prevFrame,
+        width,
+        height,
+        blurHeatField
+      )
+      passLayout = generateLayout(passSettings, width, height)
+    }
+    const decay = Math.pow(rate / 100, i)
+    applyHybridCells(
+      dest,
+      passMasters,
+      passLayout,
+      passSettings,
+      width,
+      height,
+      decay,
+      jobId
+    )
   }
 
   ctx.putImageData(imageData, 0, 0)
@@ -588,7 +439,7 @@ function drawComposite(
   settings: EffectSettings,
   width: number,
   height: number,
-  decay = 1
+  jobId?: number
 ) {
   if (settings.showCellLayout) {
     drawCellLayoutDebug(ctx, layout.cells, width, height)
@@ -600,7 +451,7 @@ function drawComposite(
     return
   }
 
-  drawNormalEffects(ctx, layout, settings, width, height, decay)
+  drawNormalEffects(ctx, layout, settings, width, height, jobId)
 }
 
 function compositeCells(
@@ -608,39 +459,17 @@ function compositeCells(
   settings: EffectSettings,
   width: number,
   height: number,
-  decay = 1
+  jobId?: number
 ): ImageBitmap {
   const ctx = ensureWorkSurface(width, height)
-  drawComposite(ctx, layout, settings, width, height, decay)
+  drawComposite(ctx, layout, settings, width, height, jobId)
 
   const bitmap = workCanvas!.transferToImageBitmap()
-  // transferToImageBitmap detaches the canvas — recreate on next composite
   workCanvas = null
   workCtx = null
   workWidth = 0
   workHeight = 0
   return bitmap
-}
-
-/** Phase 2 pass into ImageData without detaching the shared work canvas. */
-function renderPassToImageData(
-  layout: CachedLayout,
-  settings: EffectSettings,
-  width: number,
-  height: number,
-  decay: number
-): ImageData {
-  const ctx = ensureWorkSurface(width, height)
-  drawComposite(ctx, layout, settings, width, height, decay)
-  return ctx.getImageData(0, 0, width, height)
-}
-
-function bitmapFromImageData(imageData: ImageData): ImageBitmap {
-  const canvas = new OffscreenCanvas(imageData.width, imageData.height)
-  const ctx = canvas.getContext("2d")
-  if (!ctx) throw new Error("Failed to create ImageBitmap from ImageData")
-  ctx.putImageData(imageData, 0, 0)
-  return canvas.transferToImageBitmap()
 }
 
 function resolveLayout(settings: EffectSettings, width: number, height: number) {
@@ -658,111 +487,8 @@ function resolveLayout(settings: EffectSettings, width: number, height: number) 
   return layout
 }
 
-function clampPasses(value: number): number {
-  const n = Math.round(Number(value) || 1)
-  if (n < 1) return 1
-  if (n > 3) return 3
-  return n
-}
-
-/**
- * Recursive Phase 1+2 solver: each pass feeds its output into the next.
- * Phase 3 texture must NOT run here — the composite worker applies it once
- * after this pipeline returns the final bitmap.
- *
- * Intermediate passes keep the shared work canvas (ImageData handoff) so we
- * only transferToImageBitmap on the final pass.
- */
-function runRecursivePasses(
-  settings: EffectSettings,
-  width: number,
-  height: number,
-  rootSource: ImageBitmap,
-  jobId?: number
-): ImageBitmap {
-  const passCount = clampPasses(settings.passes)
-  const previousSource = cachedSource
-  let current = rootSource
-  /** Intermediate bitmaps we own and must close (never the root source). */
-  let owned: ImageBitmap | null = null
-
-  try {
-    for (let i = 0; i < passCount; i++) {
-      if (jobId !== undefined && isStale(jobId)) {
-        throw new Error("__cancelled__")
-      }
-
-      // Point draw helpers at this pass's source image.
-      cachedSource = current
-
-      // Pass 0: decay=1 and passSeed=settings.seed (identical to a 1-pass render).
-      const decay = Math.pow(settings.rate / 100, i)
-      const passSeed = settings.seed + i
-
-      // Phase 1 — layout/grid with per-pass seed (does not mutate settings.seed).
-      const layout = resolveLayout(
-        { ...settings, seed: passSeed },
-        width,
-        height
-      )
-
-      const isLast = i === passCount - 1
-      if (isLast) {
-        // Final pass: transfer the work canvas into the result bitmap.
-        const loopOutput = compositeCells(
-          layout,
-          settings,
-          width,
-          height,
-          decay
-        )
-        if (owned) {
-          try {
-            owned.close()
-          } catch {
-            // already closed
-          }
-          owned = null
-        }
-        return loopOutput
-      }
-
-      // Intermediate: ImageData → temp bitmap; keep shared work canvas intact.
-      const imageData = renderPassToImageData(
-        layout,
-        settings,
-        width,
-        height,
-        decay
-      )
-      if (owned) {
-        try {
-          owned.close()
-        } catch {
-          // already closed
-        }
-      }
-      owned = bitmapFromImageData(imageData)
-      current = owned
-    }
-
-    throw new Error("Recursive passes produced no output")
-  } finally {
-    cachedSource = previousSource
-    if (owned) {
-      try {
-        owned.close()
-      } catch {
-        // already closed
-      }
-    }
-  }
-}
-
-// ─── Render orchestration ───────────────────────────────────────────────────
-
 function renderFrame(jobId: number, settings: EffectSettings) {
-  if (!cachedSource) {
+  if (!cachedSource || !colorMasters) {
     post({ type: "error", jobId, message: "No source image cached in worker" })
     return
   }
@@ -777,13 +503,8 @@ function renderFrame(jobId: number, settings: EffectSettings) {
 
   let bitmap: ImageBitmap
   try {
-    bitmap = runRecursivePasses(
-      settings,
-      width,
-      height,
-      cachedSource,
-      jobId
-    )
+    const layout = resolveLayout(settings, width, height)
+    bitmap = compositeCells(layout, settings, width, height, jobId)
   } catch (err) {
     if (err instanceof Error && err.message === "__cancelled__") {
       post({ type: "cancelled", jobId })
@@ -836,7 +557,11 @@ function pumpRenders() {
 
 self.onmessage = (event: MessageEvent<EffectWorkerInMessage>) => {
   const msg = event.data
-  if (!msg || typeof msg !== "object" || typeof (msg as { type?: unknown }).type !== "string") {
+  if (
+    !msg ||
+    typeof msg !== "object" ||
+    typeof (msg as { type?: unknown }).type !== "string"
+  ) {
     return
   }
 
@@ -850,10 +575,8 @@ self.onmessage = (event: MessageEvent<EffectWorkerInMessage>) => {
     }
     cachedSource = msg.bitmap
     clearLayoutCache()
-    workCanvas = null
-    workCtx = null
-    workWidth = 0
-    workHeight = 0
+    rebuildColorMasters(msg.bitmap)
+    workImageData = null
     return
   }
 
@@ -865,8 +588,10 @@ self.onmessage = (event: MessageEvent<EffectWorkerInMessage>) => {
       cachedSource = null
     }
     clearLayoutCache()
+    clearColorMasters()
     workCanvas = null
     workCtx = null
+    workImageData = null
     return
   }
 

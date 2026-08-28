@@ -2,12 +2,12 @@ import type { MetadataRoute } from "next"
 import { getSiteUrl } from "@/lib/site"
 
 /** Stable last-mod for crawlers (bump when shipping material site changes). */
-const SITE_LAST_MODIFIED = new Date("2026-08-15T00:00:00.000Z")
+const SITE_LAST_MODIFIED = new Date("2026-08-28T00:00:00.000Z")
 
 export default function sitemap(): MetadataRoute.Sitemap {
   return [
     {
-      url: getSiteUrl(),
+      url: `${getSiteUrl()}/`,
       lastModified: SITE_LAST_MODIFIED,
       changeFrequency: "weekly",
       priority: 1,
