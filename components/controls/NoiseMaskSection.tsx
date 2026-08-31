@@ -1,6 +1,7 @@
 "use client"
 
 import type { Dispatch, SetStateAction } from "react"
+import { memo } from "react"
 import { CollapsibleCallout } from "@/components/collapsible-callout"
 import { Slider } from "@/components/ui/slider"
 import { Switch } from "@/components/ui/switch"
@@ -20,7 +21,7 @@ type NoiseMaskSectionProps = {
 /**
  * Noise Mask: which Cells switch ON, plus the mask debug overlay.
  */
-export function NoiseMaskSection({
+export const NoiseMaskSection = memo(function NoiseMaskSection({
   showNoiseMap,
   handleShowNoiseMapChange,
   noiseScale,
@@ -116,4 +117,4 @@ export function NoiseMaskSection({
       </div>
     </CollapsibleCallout>
   )
-}
+})

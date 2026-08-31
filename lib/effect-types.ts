@@ -128,6 +128,20 @@ export type EffectSettings = {
   slitScanLuminanceMask: boolean
 }
 
+/**
+ * How Live Play animates. The Cell grid is static in both, and in both the pixels
+ * inside each Cell scroll downward and wrap at that Cell's own borders. What
+ * differs is what the smear is pinned to, which is what makes them read so
+ * differently on screen.
+ *
+ *   fixed    the smear wraps with the Cell's contents, so it commutes with the
+ *            scroll: the smeared Cell simply slides, seamless and calm
+ *   dynamic  the smear holds at the Cell's edges, pinned to the Cell rather than
+ *            to its contents, so it re-forms every frame as pixels scroll
+ *            through — the effects visibly redraw and churn
+ */
+export type LivePlayMode = "fixed" | "dynamic"
+
 /** Settings subset consumed by the Phase 3 composite worker. */
 export type CompositeTextureSettings = {
   textureEnabled: boolean
@@ -138,7 +152,27 @@ export type CompositeTextureSettings = {
 export type EffectWorkerInMessage =
   | { type: "setSource"; bitmap: ImageBitmap }
   | { type: "clearSource" }
-  | { type: "render"; jobId: number; settings: EffectSettings }
+  | {
+      type: "render"
+      jobId: number
+      settings: EffectSettings
+      /**
+       * Live Play travel for this frame, in pixels of downward motion. What it
+       * moves depends on `livePlayMode`. Absent / 0 is the static frame.
+       * Deliberately not part of `EffectSettings`: it changes every frame and
+       * must never touch `LayoutParams` or `SlitScanParams`.
+       */
+      offsetY?: number
+      /** Which Live Play behavior `offsetY` drives. Absent means `fixed`. */
+      livePlayMode?: LivePlayMode
+      /**
+       * True only for frames posted by the Live Play animation loop. It gates
+       * the worker's Fixed-mode Cell cache: any other render drops that cache
+       * and recomputes, so nothing a settings change touched can survive into
+       * the next frame. Absent means a normal, settings-driven render.
+       */
+      live?: boolean
+    }
 
 export type EffectWorkerOutMessage =
   | {

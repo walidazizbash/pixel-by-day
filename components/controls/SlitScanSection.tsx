@@ -1,6 +1,7 @@
 "use client"
 
 import type { Dispatch, SetStateAction } from "react"
+import { memo } from "react"
 import type { SlitScanMode } from "@/lib/effect-types"
 import { Slider } from "@/components/ui/slider"
 import { Switch } from "@/components/ui/switch"
@@ -28,7 +29,7 @@ type SlitScanSectionProps = {
  * Slit Scan: master switch, displacement mode, luminance mask, and its three sliders.
  * Rendered inside BaseEffectsSection, where the rest of the effect weights live.
  */
-export function SlitScanSection({
+export const SlitScanSection = memo(function SlitScanSection({
   slitScanEnabled,
   setSlitScanEnabled,
   slitScanMode,
@@ -235,4 +236,4 @@ export function SlitScanSection({
       </div>
     </div>
   )
-}
+})

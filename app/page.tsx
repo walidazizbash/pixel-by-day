@@ -12,6 +12,7 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import type {
   EffectSettings,
+  LivePlayMode,
   SlitScanMode,
   SmearStyleSettings,
   SubdivisionMode,
@@ -30,6 +31,7 @@ import type { HistorySnapshot } from "@/components/history/types"
 import {
   CONTROL_DEFAULTS,
   DEFAULT_SEED,
+  LIVE_PLAY_SPEED,
   SLIT_SCAN_MODE_DEFAULT,
   SMEAR_AMOUNT_DEFAULTS,
   SMEAR_WEIGHT_DEFAULTS,
@@ -502,6 +504,54 @@ export default function Home() {
     null
   )
   const previewing = previewItem !== null
+  /** Live Play on/off. The offset itself never enters state — see the rAF loop below. */
+  const [isPlaying, setIsPlaying] = useState(false)
+  const togglePlaying = useCallback(() => setIsPlaying((prev) => !prev), [])
+  /**
+   * Which Live Play behavior runs. Both scroll the pixels inside static Cells;
+   * `fixed` slides the smear along with them, `dynamic` pins it to the Cell so
+   * the effects churn. Unlike the offset this changes at human speed, so state
+   * is fine.
+   */
+  const [livePlayMode, setLivePlayMode] = useState<LivePlayMode>("fixed")
+  /** Live Play scroll speed, in pixels per rendered frame. */
+  const [livePlaySpeed, setLivePlaySpeed] = useState<number>(
+    LIVE_PLAY_SPEED.default
+  )
+  /**
+   * Live Play scroll offset, in a ref on purpose: at 60fps this changes faster than
+   * React can re-render ~2000 lines of unmemoized controls, and nothing in the tree
+   * needs to read it. Only ever holds an offset that was actually rendered — see
+   * the loop below.
+   */
+  const livePlayOffsetRef = useRef(0)
+  /**
+   * The speed the loop actually reads. Mirrored into a ref so dragging the slider
+   * does not tear the animation down and rebuild it sixty times a second — the
+   * running loop picks the new step up on its very next tick instead.
+   */
+  const livePlaySpeedRef = useRef(livePlaySpeed)
+  useEffect(() => {
+    livePlaySpeedRef.current = livePlaySpeed
+  }, [livePlaySpeed])
+
+  /**
+   * Speed changes write the ref *and* the state. The effect above would sync the
+   * ref on its own, but passive effects flush after paint — so a frame could run
+   * at the old speed in between. Writing it here means the very next tick reads
+   * the new value, and the state write is only there to move the slider.
+   */
+  const handleLivePlaySpeedChange = useCallback((next: number) => {
+    // Clamped but deliberately not rounded — the slider is continuous, and the
+    // fractional part is what smooths the bottom of the range.
+    if (!Number.isFinite(next)) return
+    const clamped = Math.min(
+      LIVE_PLAY_SPEED.max,
+      Math.max(LIVE_PLAY_SPEED.min, next)
+    )
+    livePlaySpeedRef.current = clamped
+    setLivePlaySpeed(clamped)
+  }, [])
   const fileInputRef = useRef<HTMLInputElement>(null)
   const liveCanvasRef = useRef<HTMLCanvasElement>(null)
   const historyScrollRef = useRef<HTMLDivElement>(null)
@@ -712,8 +762,13 @@ export default function Home() {
     []
   )
 
-  const { isExportingPng, exportHighResImage, capturePhase2PngBlob } =
-    useAppWorkers({
+  const {
+    isExportingPng,
+    exportHighResImage,
+    capturePhase2PngBlob,
+    renderLiveFrame,
+    applyLivePlayMode,
+  } = useAppWorkers({
       settings: effectSettings,
       imageSrc,
       // The preview modal paints an opaque overlay across the canvas, so the renders
@@ -722,6 +777,54 @@ export default function Home() {
       onPreviewFrame,
       onSourcePreview,
     })
+
+  /**
+   * Live Play — the Cell grid holds still while the pixels inside each Cell scroll
+   * downward and wrap at that Cell's own borders. `fixed` carries the smear along
+   * with them; `dynamic` pins it to the Cell so the effects re-form every frame.
+   *
+   * The loop talks to the effect worker directly through `renderLiveFrame`, and
+   * deliberately never calls `setEffectSettings`: this tree is unmemoized, so a
+   * state write per frame would re-render every control and starve the animation.
+   *
+   * The offset advances per *dispatched* frame, not per tick. `renderLiveFrame`
+   * drops ticks the worker is too busy for, and a dropped tick must not move the
+   * math: the ref would then hold an offset the canvas never showed, and the next
+   * slider drag would render that offset and jump the pixels down. The cost of
+   * that lock-step is that playback tracks render throughput rather than the
+   * clock — a heavy setting scrolls slower instead of stuttering forward, which
+   * is exactly what the Speed slider is there to compensate for.
+   *
+   * Speed is read from a ref, so changing it never restarts the loop; the offset
+   * is left alone by both speed and mode changes, so neither moves the picture.
+   */
+  useEffect(() => {
+    if (!isPlaying || !imageSrc || previewing) return
+
+    let frame = requestAnimationFrame(function tick() {
+      const next = livePlayOffsetRef.current + livePlaySpeedRef.current
+      if (renderLiveFrame(next, livePlayMode)) {
+        livePlayOffsetRef.current = next
+      }
+      frame = requestAnimationFrame(tick)
+    })
+
+    return () => cancelAnimationFrame(frame)
+  }, [isPlaying, imageSrc, previewing, livePlayMode, renderLiveFrame])
+
+  /**
+   * Swapping modes repaints at the offset already on screen, whether playing or
+   * paused. `applyLivePlayMode` commits the mode and queues that repaint through
+   * the same path a slider uses, so it cannot be lost to backpressure the way an
+   * animation frame can — while paused, nothing would ever come along to retry it.
+   */
+  const handleLivePlayModeChange = useCallback(
+    (mode: LivePlayMode) => {
+      setLivePlayMode(mode)
+      applyLivePlayMode(mode)
+    },
+    [applyLivePlayMode]
+  )
 
   function processFile(file: File) {
     if (!isAllowedImageFile(file)) {
@@ -1261,6 +1364,12 @@ export default function Home() {
             isBaking={isBaking}
             resetGenerationParameters={resetGenerationParameters}
             handleCapture={handleCapture}
+            isPlaying={isPlaying}
+            togglePlaying={togglePlaying}
+            livePlayMode={livePlayMode}
+            setLivePlayMode={handleLivePlayModeChange}
+            livePlaySpeed={livePlaySpeed}
+            setLivePlaySpeed={handleLivePlaySpeedChange}
           />
         </div>
       </main>

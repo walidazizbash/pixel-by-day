@@ -1,6 +1,7 @@
 "use client"
 
 import type { Dispatch, SetStateAction } from "react"
+import { memo } from "react"
 import { Slider } from "@/components/ui/slider"
 import { ResetAmountButton } from "@/components/controls/ResetAmountButton"
 import { CONTROL_DEFAULTS, sliderValue } from "@/components/controls/defaults"
@@ -19,7 +20,7 @@ type RepeatSectionProps = {
 /**
  * Repeat pass count and per-pass decay. Lives above the collapsible sections.
  */
-export function RepeatSection({
+export const RepeatSection = memo(function RepeatSection({
   passes,
   passesDrag,
   rate,
@@ -128,4 +129,4 @@ export function RepeatSection({
       </div>
     </div>
   )
-}
+})

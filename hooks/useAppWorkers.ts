@@ -6,6 +6,7 @@ import type {
   CompositeWorkerOutMessage,
   EffectSettings,
   EffectWorkerOutMessage,
+  LivePlayMode,
 } from "@/lib/effect-types"
 import { MAX_DECODE_EDGE, MAX_DECODE_PIXELS } from "@/lib/constants"
 
@@ -102,6 +103,27 @@ type UseAppWorkersResult = {
    * Used by Bake so grain does not stack across recursive swaps.
    */
   capturePhase2PngBlob: () => Promise<Blob | null>
+  /**
+   * Live Play: try to post one frame at the given offset and mode, straight past
+   * React. The caller drives this from a `requestAnimationFrame` loop with the
+   * offset in a ref — routing it through `setState` would re-render the whole
+   * unmemoized control tree every frame.
+   *
+   * Returns whether the frame was actually dispatched. A dropped frame commits
+   * nothing, so the caller must only advance its offset on `true`: the stored
+   * offset has to stay equal to the one on screen, or the next settings-driven
+   * render would jump the pixels forward by every tick that was skipped.
+   */
+  renderLiveFrame: (offsetY: number, mode: LivePlayMode) => boolean
+  /**
+   * Switch which Live Play behavior renders, at the offset already on screen.
+   *
+   * Unlike a frame, a mode change may never be dropped — nothing would come
+   * along to retry it while paused — so it commits immediately and goes out
+   * through the same queued path as a slider, which coalesces and waits behind a
+   * busy worker. The offset is untouched, so the swap does not jump.
+   */
+  applyLivePlayMode: (mode: LivePlayMode) => void
 }
 
 export function useAppWorkers({
@@ -143,6 +165,15 @@ export function useAppWorkers({
   const fullSourceBitmapRef = useRef<ImageBitmap | null>(null)
   /** Last finished Phase 2 frame — reused for texture-only Phase 3 updates. */
   const phase2BitmapRef = useRef<ImageBitmap | null>(null)
+  /**
+   * Offset of the last frame actually dispatched — never of one that was
+   * dropped. Read by every dispatch, not just the animated ones, so a slider
+   * moved while playing (or long after pausing) renders at exactly the position
+   * the canvas is already showing.
+   */
+  const liveOffsetYRef = useRef(0)
+  /** Live Play behavior the offset drives. Same deal: every dispatch reads it. */
+  const liveModeRef = useRef<LivePlayMode>("fixed")
 
   const settingsRef = useRef(settings)
   const onPreviewFrameRef = useRef(onPreviewFrame)
@@ -281,7 +312,7 @@ export function useAppWorkers({
     [enqueueComposite]
   )
 
-  const dispatchWorkerRender = useCallback(() => {
+  const dispatchWorkerRender = useCallback((live = false) => {
     const worker = workerRef.current
     const source = sourceBitmapRef.current
     const effectSettings = settingsRef.current
@@ -296,6 +327,9 @@ export function useAppWorkers({
       type: "render",
       jobId,
       settings: { ...effectSettings },
+      offsetY: liveOffsetYRef.current,
+      livePlayMode: liveModeRef.current,
+      live,
     })
   }, [])
 
@@ -371,6 +405,39 @@ export function useAppWorkers({
       })()
     })
   }, [enqueueComposite, scheduleRegen])
+
+  const renderLiveFrame = useCallback(
+    (offsetY: number, mode: LivePlayMode) => {
+      if (!workerRef.current || !sourceBitmapRef.current) return false
+      // The worker paces the loop. A frame that arrives while it is still busy is
+      // dropped rather than queued, so playback degrades to a lower frame rate
+      // instead of accumulating a backlog of stale frames behind the animation.
+      if (effectBusyRef.current || pendingRegenRef.current) return false
+      // A settings-driven regen is already queued for this frame; it renders at
+      // the committed offset, which is what the canvas is already showing.
+      if (pendingDispatchRef.current) return false
+
+      // Commit only now that the frame is going out. Storing a dropped tick's
+      // offset is what made a paused canvas jump on the next slider move: the
+      // ref had run ahead of the last frame anyone actually saw.
+      liveOffsetYRef.current = offsetY
+      liveModeRef.current = mode
+      // The only path that may use the worker's Fixed-mode Cell cache: every
+      // other dispatch is settings-driven and must rebuild from scratch.
+      dispatchWorkerRender(true)
+      return true
+    },
+    [dispatchWorkerRender]
+  )
+
+  const applyLivePlayMode = useCallback(
+    (mode: LivePlayMode) => {
+      if (liveModeRef.current === mode) return
+      liveModeRef.current = mode
+      scheduleRegen()
+    },
+    [scheduleRegen]
+  )
 
   const exportHighResImage = useCallback(() => {
     const fullSource = fullSourceBitmapRef.current
@@ -700,5 +767,7 @@ export function useAppWorkers({
     isExportingPng,
     exportHighResImage,
     capturePhase2PngBlob,
+    renderLiveFrame,
+    applyLivePlayMode,
   }
 }

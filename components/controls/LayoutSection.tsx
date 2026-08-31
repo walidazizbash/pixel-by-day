@@ -1,6 +1,7 @@
 "use client"
 
 import type { Dispatch, SetStateAction } from "react"
+import { memo } from "react"
 import type { SubdivisionMode } from "@/lib/effect-types"
 import { CollapsibleCallout } from "@/components/collapsible-callout"
 import { Slider } from "@/components/ui/slider"
@@ -24,7 +25,7 @@ type LayoutSectionProps = {
 /**
  * Cell Pattern: the Phase 1 layout controls plus the debug overlay switch.
  */
-export function LayoutSection({
+export const LayoutSection = memo(function LayoutSection({
   showCellLayout,
   handleShowCellLayoutChange,
   subdivisionLoops,
@@ -162,4 +163,4 @@ export function LayoutSection({
       </div>
     </CollapsibleCallout>
   )
-}
+})

@@ -1,6 +1,7 @@
 "use client"
 
 import type { Dispatch, SetStateAction } from "react"
+import { memo } from "react"
 import type { SmearStyleSettings } from "@/lib/effect-types"
 import { CollapsibleCallout } from "@/components/collapsible-callout"
 import { Slider } from "@/components/ui/slider"
@@ -36,7 +37,7 @@ type SmearsSectionProps = {
 /**
  * Smear: the five directional styles, their signed amounts and their coverage weights.
  */
-export function SmearsSection({
+export const SmearsSection = memo(function SmearsSection({
   smearVertical,
   setSmearVertical,
   smearHorizontal,
@@ -268,4 +269,4 @@ export function SmearsSection({
       ))}
     </CollapsibleCallout>
   )
-}
+})

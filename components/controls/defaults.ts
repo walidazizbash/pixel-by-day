@@ -34,6 +34,26 @@ export const SMEAR_WEIGHT_DEFAULTS = {
 } as const
 
 /**
+ * Live Play scroll speed: pixels of in-Cell scroll per *rendered* frame.
+ *
+ * UI-only, like the smear defaults above — it paces the animation loop and never
+ * reaches `EffectSettings`, so it cannot touch the worker's caches. A small range
+ * is enough now that the Fixed-mode Cell cache keeps playback at frame rate: at
+ * 60fps this spans 60–240 px/s, and a step past 4 reads as a jump rather than a
+ * scroll.
+ *
+ * Continuous, not integral. The offset it feeds is a float that the worker floors
+ * per Cell, so a fractional speed simply advances the scroll on some frames and
+ * not others — which is what makes the low end of this range usable.
+ */
+export const LIVE_PLAY_SPEED = {
+  min: 1,
+  max: 4,
+  step: 0.01,
+  default: 2,
+} as const
+
+/**
  * Default Slit Scan displacement. Not in CONTROL_DEFAULTS because it is not a
  * slider, same as `subdivisionMode`.
  */

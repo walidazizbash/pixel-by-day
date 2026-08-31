@@ -1,6 +1,7 @@
 "use client"
 
 import type { Dispatch, SetStateAction } from "react"
+import { memo } from "react"
 import type { SlitScanMode } from "@/lib/effect-types"
 import { CollapsibleCallout } from "@/components/collapsible-callout"
 import { Slider } from "@/components/ui/slider"
@@ -45,7 +46,7 @@ type BaseEffectsSectionProps = {
  * Effects: the per-Cell effect weights (Dither, Invert, Surreal, Pixelate, Halftone,
  * Thermal, Original) plus the Slit Scan sub-panel and the Random Sample switch.
  */
-export function BaseEffectsSection({
+export const BaseEffectsSection = memo(function BaseEffectsSection({
   randomSample,
   setRandomSample,
   weightDither,
@@ -373,4 +374,4 @@ export function BaseEffectsSection({
         </div>
     </CollapsibleCallout>
   )
-}
+})

@@ -2,8 +2,18 @@
  * Composite-time smear style family.
  * Does not affect Phase 1 layout or Phase 2 mask decisions.
  *
- * Snapshot smear: freeze the Cell, sample only that snapshot, clamp
- * out-of-bounds reads to the Cell edge. Trails never leave the Cell.
+ * Snapshot smear: freeze the Cell, sample only that snapshot, and resolve reads
+ * that leave the Cell one of two ways. Trails never leave the Cell either way.
+ *
+ *   wrap   reads fold around the Cell. Scrolling a Cell's contents is a cyclic
+ *          vertical rotation, and a cyclic smear commutes with it — smearing
+ *          scrolled pixels equals scrolling smeared pixels — so the trail is
+ *          rigid and crosses the scroll's wrap line unbroken. Live Play's Fixed
+ *          mode, and every static frame.
+ *   clamp  reads hold at the trailing edge. The smear is then pinned to the Cell
+ *          rather than to its contents, so as pixels scroll through, the trail
+ *          re-forms every frame instead of sliding along with them. That churn
+ *          is the whole point of Live Play's Dynamic mode.
  *
  * Directional assignment is mutually exclusive (`chooseSmear`): at most
  * one of Vertical / Horizontal / Diagonal per Cell. Recursive is a
@@ -32,6 +42,12 @@ import {
   recursiveSmearRoll,
   type SmearStyleName,
 } from "@/lib/pipeline"
+
+/**
+ * How a read that leaves the Cell resolves — see the module note. `wrap` is the
+ * default everywhere; only Live Play's Dynamic mode asks for `clamp`.
+ */
+export type SmearEdge = "wrap" | "clamp"
 
 /** Reused scratch for cell-local ops (snapshot / recursive). */
 let smearScratch: Uint8ClampedArray | null = null
@@ -64,17 +80,27 @@ function signedSmear(amount: number): { mag: number; sign: number } {
   return { mag: Math.abs(a), sign: a < 0 ? -1 : 1 }
 }
 
-function clampFloat(v: number, lo: number, hi: number): number {
-  if (v < lo) return lo
-  if (v > hi) return hi
-  return v
-}
+/**
+ * Sub-pixel pull is quantized to 1/64 px, and the quantum is load-bearing.
+ *
+ * `pull` is added to integer row/column indices. A dyadic value keeps that sum
+ * exactly representable, so `row + pull` and `(row − scroll) + pull` agree in
+ * their fractional part to the bit. That is what lets Live Play's Fixed-mode
+ * Cell cache smear once and rotate the result: without it the two paths differ
+ * by one ULP, which is invisible in the smear itself but lands either side of
+ * dither's and halftone's hard threshold and flips those pixels black↔white.
+ *
+ * 1/64 px is far finer than anything visible — the pull spans up to a whole Cell.
+ */
+const SMEAR_PULL_QUANTUM = 64
 
 /** Linear 0–1 coverage of the Cell's trailing-edge pull, including Repeat decay. */
 function smearPull(mag: number, maxPull: number, decay: number): number {
   const t = (mag / 100) * (Number.isFinite(decay) ? Math.max(0, decay) : 1)
   if (!(t > 0) || maxPull <= 0) return 0
-  return maxPull * t
+  return (
+    Math.round(maxPull * t * SMEAR_PULL_QUANTUM) / SMEAR_PULL_QUANTUM
+  )
 }
 
 /** Copy the Cell's current work-buffer pixels into scratch (frozen prior state). */
@@ -100,7 +126,33 @@ function snapshotCell(
   }
 }
 
-/** Bilinear sample of the Cell snapshot, clamped to the Cell (trailing-edge hold). */
+/**
+ * Fold a coordinate into [0, size). The final compare catches the one float
+ * case that would otherwise read past the buffer: a tiny negative input whose
+ * `% size` rounds back up to exactly `size` when the period is added.
+ */
+function wrapFloat(v: number, size: number): number {
+  const m = v % size
+  const w = m < 0 ? m + size : m
+  return w < size ? w : 0
+}
+
+function clampFloat(v: number, lo: number, hi: number): number {
+  if (v < lo) return lo
+  if (v > hi) return hi
+  return v
+}
+
+/**
+ * Bilinear sample of the Cell snapshot.
+ *
+ * Wrapped: the far tap wraps too (`width - 1` interpolates against column 0), so
+ * the seam is continuous rather than a one-pixel band that still behaves as an
+ * edge. Clamped: both taps hold at the trailing edge, the original behavior.
+ *
+ * Reads already inside the Cell resolve identically either way, which is why
+ * Recursive — whose scale-copy never samples outside — is unaffected by the mode.
+ */
 function sampleScratchBilinear(
   scratch: Uint8ClampedArray,
   width: number,
@@ -108,16 +160,32 @@ function sampleScratchBilinear(
   fx: number,
   fy: number,
   dest: Uint8ClampedArray,
-  dst: number
+  dst: number,
+  edge: SmearEdge
 ) {
-  const maxX = width - 1
-  const maxY = height - 1
-  const x = clampFloat(fx, 0, maxX)
-  const y = clampFloat(fy, 0, maxY)
-  const x0 = x | 0
-  const y0 = y | 0
-  const x1 = x0 < maxX ? x0 + 1 : maxX
-  const y1 = y0 < maxY ? y0 + 1 : maxY
+  let x: number
+  let y: number
+  let x0: number
+  let y0: number
+  let x1: number
+  let y1: number
+  if (edge === "wrap") {
+    x = wrapFloat(fx, width)
+    y = wrapFloat(fy, height)
+    x0 = x | 0
+    y0 = y | 0
+    x1 = x0 + 1 === width ? 0 : x0 + 1
+    y1 = y0 + 1 === height ? 0 : y0 + 1
+  } else {
+    const maxX = width - 1
+    const maxY = height - 1
+    x = clampFloat(fx, 0, maxX)
+    y = clampFloat(fy, 0, maxY)
+    x0 = x | 0
+    y0 = y | 0
+    x1 = x0 < maxX ? x0 + 1 : maxX
+    y1 = y0 < maxY ? y0 + 1 : maxY
+  }
   const tx = x - x0
   const ty = y - y0
   const i00 = (y0 * width + x0) * 4
@@ -145,7 +213,7 @@ function sampleScratchBilinear(
 /**
  * Directional smear from a frozen Cell snapshot with subpixel pull.
  * `offsetX`/`offsetY` are opposite the visual smear (right → sample left).
- * Out-of-Cell reads clamp to the trailing edge.
+ * Out-of-Cell reads wrap around the Cell, or hold at its edge — see `SmearEdge`.
  */
 function blitSmearFromSnapshot(
   data: Uint8ClampedArray,
@@ -153,7 +221,8 @@ function blitSmearFromSnapshot(
   fullWidth: number,
   cell: CachedCell,
   offsetX: number,
-  offsetY: number
+  offsetY: number,
+  edge: SmearEdge
 ) {
   const width = cell.width
   const height = cell.height
@@ -169,16 +238,22 @@ function blitSmearFromSnapshot(
         col + offsetX,
         row + offsetY,
         data,
-        (dstRow + col) * 4
+        (dstRow + col) * 4,
+        edge
       )
     }
   }
 }
 
 /**
- * 45-degree smear. Pull is equal on X and Y; when a sample would leave
- * the Cell, both axes retract together so the trail never collapses
- * onto a single axis.
+ * 45-degree smear. Pull is equal on X and Y, and both axes retract together so
+ * the trail never collapses onto a single axis.
+ *
+ * Under `wrap`, only the horizontal room constrains that retraction — vertical
+ * reads wrap instead, which they must, because a row-dependent pull would vary
+ * the smear down the Cell and Fixed mode's scroll would drag that variation
+ * through the pixels and break the trail. Under `clamp` the vertical room
+ * constrains it too, exactly as it always did.
  */
 function blitDiagonalFromSnapshot(
   data: Uint8ClampedArray,
@@ -187,7 +262,8 @@ function blitDiagonalFromSnapshot(
   cell: CachedCell,
   pull: number,
   sampleSignX: number,
-  sampleSignY: number
+  sampleSignY: number,
+  edge: SmearEdge
 ) {
   const width = cell.width
   const height = cell.height
@@ -199,8 +275,10 @@ function blitDiagonalFromSnapshot(
     const dstRow = (cell.y + row) * fullWidth + cell.x
     for (let col = 0; col < width; col++) {
       const roomX = sampleSignX < 0 ? col : maxCol - col
-      const roomY = sampleSignY < 0 ? row : maxRow - row
-      const p = Math.min(pull, roomX, roomY)
+      const p =
+        edge === "wrap"
+          ? Math.min(pull, roomX)
+          : Math.min(pull, roomX, sampleSignY < 0 ? row : maxRow - row)
       sampleScratchBilinear(
         scratch,
         width,
@@ -208,7 +286,8 @@ function blitDiagonalFromSnapshot(
         col + sampleSignX * p,
         row + sampleSignY * p,
         data,
-        (dstRow + col) * 4
+        (dstRow + col) * 4,
+        edge
       )
     }
   }
@@ -222,7 +301,8 @@ function applyVerticalSmear(
   fullWidth: number,
   cell: CachedCell,
   amount: number,
-  decay: number
+  decay: number,
+  edge: SmearEdge
 ) {
   const width = cell.width
   const height = cell.height
@@ -242,7 +322,8 @@ function applyVerticalSmear(
     fullWidth,
     cell,
     0,
-    smearDown ? -pull : pull
+    smearDown ? -pull : pull,
+    edge
   )
 }
 
@@ -252,7 +333,8 @@ function applyHorizontalSmear(
   fullWidth: number,
   cell: CachedCell,
   amount: number,
-  decay: number
+  decay: number,
+  edge: SmearEdge
 ) {
   const width = cell.width
   const height = cell.height
@@ -272,7 +354,8 @@ function applyHorizontalSmear(
     fullWidth,
     cell,
     smearRight ? -pull : pull,
-    0
+    0,
+    edge
   )
 }
 
@@ -283,7 +366,8 @@ function applyDiagonalSmear(
   cell: CachedCell,
   amount: number,
   decay: number,
-  axis: 1 | 2
+  axis: 1 | 2,
+  edge: SmearEdge
 ) {
   const width = cell.width
   const height = cell.height
@@ -300,7 +384,16 @@ function applyDiagonalSmear(
 
   const scratch = ensureSmearScratch(width * height * 4)
   snapshotCell(source, fullWidth, cell, scratch)
-  blitDiagonalFromSnapshot(dest, scratch, fullWidth, cell, pull, sampleX, sampleY)
+  blitDiagonalFromSnapshot(
+    dest,
+    scratch,
+    fullWidth,
+    cell,
+    pull,
+    sampleX,
+    sampleY,
+    edge
+  )
 }
 
 /** Nested scale-copy tunnel inside the Cell (one bilinear pass, continuous inset). */
@@ -310,7 +403,8 @@ function applyRecursiveSmear(
   fullWidth: number,
   cell: CachedCell,
   amount: number,
-  decay: number
+  decay: number,
+  edge: SmearEdge
 ) {
   const width = cell.width
   const height = cell.height
@@ -348,7 +442,8 @@ function applyRecursiveSmear(
         u,
         v,
         dest,
-        (dstRow + col) * 4
+        (dstRow + col) * 4,
+        edge
       )
     }
   }
@@ -357,6 +452,7 @@ function applyRecursiveSmear(
 /**
  * Apply exactly one smear style to an already-seeded ON Cell.
  * `decay` scales smear shift intensity only (not assignment).
+ * `edge` decides how reads that leave the Cell resolve — see `SmearEdge`.
  */
 function applySmearStyle(
   data: Uint8ClampedArray,
@@ -366,7 +462,8 @@ function applySmearStyle(
   settings: EffectSettings,
   style: SmearStyleName,
   decay = 1,
-  source: Uint8ClampedArray = data
+  source: Uint8ClampedArray = data,
+  edge: SmearEdge = "wrap"
 ) {
   const smearDecay = Number.isFinite(decay) ? Math.max(0, decay) : 1
 
@@ -377,7 +474,8 @@ function applySmearStyle(
       fullWidth,
       cell,
       settings.smearVertical.amount,
-      smearDecay
+      smearDecay,
+      edge
     )
     return
   }
@@ -388,7 +486,8 @@ function applySmearStyle(
       fullWidth,
       cell,
       settings.smearHorizontal.amount,
-      smearDecay
+      smearDecay,
+      edge
     )
     return
   }
@@ -400,7 +499,8 @@ function applySmearStyle(
       cell,
       settings.smearDiagonal1.amount,
       smearDecay,
-      1
+      1,
+      edge
     )
     return
   }
@@ -412,7 +512,8 @@ function applySmearStyle(
       cell,
       settings.smearDiagonal2.amount,
       smearDecay,
-      2
+      2,
+      edge
     )
     return
   }
@@ -422,7 +523,8 @@ function applySmearStyle(
     fullWidth,
     cell,
     settings.smearRecursive.amount,
-    smearDecay
+    smearDecay,
+    edge
   )
 }
 
@@ -430,6 +532,76 @@ function applySmearStyle(
  * Apply directional smear (at most one), then Recursive on top when assigned.
  * Caller must already have seeded the Cell from its Color Master in `data`.
  */
+/**
+ * The directional pass on its own: at most one of Vertical / Horizontal /
+ * Diagonal, per `chooseSmear`.
+ *
+ * Split out because this half is the only one that survives Live Play's Fixed
+ * mode cache. Under `wrap` a directional smear is a cyclic operation, so it
+ * commutes with the in-Cell scroll — smearing scrolled pixels equals scrolling
+ * smeared pixels — which is exactly what lets the worker compute it once and
+ * rotate the result. See `resolveFixedCellEntry` in workers/effect-worker.ts.
+ */
+export function applyDirectionalSmearPass(
+  data: Uint8ClampedArray,
+  fullWidth: number,
+  fullHeight: number,
+  cell: CachedCell,
+  settings: EffectSettings,
+  decay = 1,
+  source: Uint8ClampedArray = data,
+  edge: SmearEdge = "wrap"
+) {
+  const style = chooseSmear(cell.randomVal, settings)
+  if (!style) return
+  applySmearStyle(
+    data,
+    fullWidth,
+    fullHeight,
+    cell,
+    settings,
+    style,
+    decay,
+    source,
+    edge
+  )
+}
+
+/**
+ * The Recursive pass on its own — a second, independent roll that stacks on top
+ * of any directional smear.
+ *
+ * Deliberately NOT cacheable. Recursive is a scale-copy: output row `r` reads
+ * source row `v(r)`, with `v` steeper than 1, so a scrolled source gives
+ * `v(r) − k` where a rotation of the output would need `v(r − k) = v(r) − k·slope`.
+ * A zoom cannot commute with a translation, so this has to run per frame on
+ * whatever the Cell currently holds.
+ */
+export function applyRecursiveSmearPass(
+  data: Uint8ClampedArray,
+  fullWidth: number,
+  fullHeight: number,
+  cell: CachedCell,
+  settings: EffectSettings,
+  decay = 1,
+  edge: SmearEdge = "wrap"
+) {
+  if (!chooseRecursiveSmear(recursiveSmearRoll(cell.randomVal), settings)) {
+    return
+  }
+  applySmearStyle(
+    data,
+    fullWidth,
+    fullHeight,
+    cell,
+    settings,
+    "recursive",
+    decay,
+    data,
+    edge
+  )
+}
+
 export function applySmearStyles(
   data: Uint8ClampedArray,
   fullWidth: number,
@@ -437,33 +609,26 @@ export function applySmearStyles(
   cell: CachedCell,
   settings: EffectSettings,
   decay = 1,
-  source: Uint8ClampedArray = data
+  source: Uint8ClampedArray = data,
+  edge: SmearEdge = "wrap"
 ) {
-  const style = chooseSmear(cell.randomVal, settings)
-  if (style) {
-    applySmearStyle(
-      data,
-      fullWidth,
-      fullHeight,
-      cell,
-      settings,
-      style,
-      decay,
-      source
-    )
-  }
-  if (
-    chooseRecursiveSmear(recursiveSmearRoll(cell.randomVal), settings)
-  ) {
-    applySmearStyle(
-      data,
-      fullWidth,
-      fullHeight,
-      cell,
-      settings,
-      "recursive",
-      decay,
-      data
-    )
-  }
+  applyDirectionalSmearPass(
+    data,
+    fullWidth,
+    fullHeight,
+    cell,
+    settings,
+    decay,
+    source,
+    edge
+  )
+  applyRecursiveSmearPass(
+    data,
+    fullWidth,
+    fullHeight,
+    cell,
+    settings,
+    decay,
+    edge
+  )
 }

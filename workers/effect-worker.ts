@@ -16,10 +16,12 @@
 import type {
   CachedLayout,
   CachedCell,
+  EffectName,
   EffectSettings,
   EffectWorkerInMessage,
   EffectWorkerOutMessage,
   LayoutParams,
+  LivePlayMode,
 } from "@/lib/effect-types"
 import {
   extractLayoutParams,
@@ -27,7 +29,12 @@ import {
   hash2D,
   layoutParamsEqual,
 } from "@/lib/phase1-floor"
-import { applySmearStyles } from "@/lib/smear-styles"
+import {
+  applyDirectionalSmearPass,
+  applyRecursiveSmearPass,
+  applySmearStyles,
+  type SmearEdge,
+} from "@/lib/smear-styles"
 import { applyTexture } from "@/lib/texture-styles"
 import { sanitizeEffectSettings } from "@/lib/validate-settings"
 import {
@@ -64,6 +71,29 @@ let slitScanMaster: Uint8ClampedArray | null = null
 let slitScanKey: SlitScanParams | null = null
 let cachedLayout: CachedLayout | null = null
 let cachedLayoutParams: LayoutParams | null = null
+/**
+ * Live Play Fixed-mode Cell cache — the scroll-invariant half of Phase 2.
+ *
+ * Fixed mode scrolls a Cell's contents cyclically, and under `wrap` a
+ * directional smear commutes with that rotation. So the expensive part — the
+ * Color Master window plus its bilinear smear — depends on the settings alone,
+ * not on the offset, and can be computed once and merely rotated per frame.
+ *
+ * Only that half lives here. Recursive smear and the textures are re-run per
+ * frame on top of the rotated block, because neither commutes with a scroll:
+ * Recursive is a zoom, and the textures index on absolute canvas coordinates so
+ * their pattern must stay pinned to the screen while pixels flow through it.
+ *
+ * `key` is a full serialization of the settings that produced the entries, so a
+ * new field on `EffectSettings` is covered automatically — a hand-written
+ * comparison would be one more place to forget, and forgetting means stale
+ * pixels on screen.
+ */
+type FixedCellCache = {
+  key: string
+  cells: Array<Uint8ClampedArray | null>
+}
+let fixedCellCache: FixedCellCache | null = null
 let activeJobId = 0
 
 let workCanvas: OffscreenCanvas | null = null
@@ -110,6 +140,42 @@ function throwIfStale(jobId?: number) {
 function clearLayoutCache() {
   cachedLayout = null
   cachedLayoutParams = null
+}
+
+function clearFixedCellCache() {
+  fixedCellCache = null
+}
+
+/**
+ * Identity of everything the cached half depends on. Settings cover the layout,
+ * the mask, the effect assignment, the smear rolls and the Slit Scan master,
+ * since all of those derive from them; the source pixels do not, which is why
+ * `setSource` / `clearSource` drop the cache outright.
+ */
+function fixedCellCacheKey(
+  settings: EffectSettings,
+  width: number,
+  height: number
+): string {
+  return `${width}x${height}|${JSON.stringify(settings)}`
+}
+
+function resolveFixedCellCache(
+  settings: EffectSettings,
+  width: number,
+  height: number,
+  cellCount: number
+): FixedCellCache {
+  const key = fixedCellCacheKey(settings, width, height)
+  if (
+    fixedCellCache &&
+    fixedCellCache.key === key &&
+    fixedCellCache.cells.length === cellCount
+  ) {
+    return fixedCellCache
+  }
+  fixedCellCache = { key, cells: new Array(cellCount).fill(null) }
+  return fixedCellCache
 }
 
 /**
@@ -373,8 +439,196 @@ function copyContinuousCellSample(
 }
 
 /**
+ * Live Play travel for this frame, folded into one Cell's height.
+ * `Math.floor` first so the scroll lands on whole pixel rows — a fractional
+ * offset would resample the photo and soften it a little more every frame.
+ * Each Cell wraps on its own height, so a small Cell cycles fast and a tall one
+ * cycles slowly off the one shared offset.
+ */
+function wrapOffset(offsetY: number, period: number): number {
+  if (!Number.isFinite(offsetY) || period < 1) return 0
+  const wrapped = Math.floor(offsetY) % period
+  return wrapped < 0 ? wrapped + period : wrapped
+}
+
+/**
+ * One Cell's worth of Phase 2 work: copy the Color Master window → smear →
+ * texture. The Cell rectangle never moves in either Live Play mode; `scroll`
+ * rotates its *contents* downward and wraps them inside it, so the sample window
+ * is read as two bands — the bottom `scroll` rows come around to the top, and
+ * the rest follow beneath them. A `scroll` of 0 is the plain static copy.
+ *
+ * `smearEdge` is the only other thing the two modes disagree about, and it is
+ * what separates them on screen — see `LivePlayMode`.
+ */
+function paintCell(
+  dest: Uint8ClampedArray,
+  master: Uint8ClampedArray,
+  cell: CachedCell,
+  scroll: number,
+  effect: EffectName,
+  settings: EffectSettings,
+  width: number,
+  height: number,
+  decay: number,
+  smearEdge: SmearEdge
+) {
+  if (cell.width < 1 || cell.height < 1) return
+
+  const { sampleX, sampleY } = resolveCellSampleOrigin(
+    cell,
+    settings,
+    width,
+    height
+  )
+
+  if (scroll > 0) {
+    copyContinuousCellSample(
+      master,
+      dest,
+      width,
+      sampleX,
+      sampleY + cell.height - scroll,
+      cell.x,
+      cell.y,
+      cell.width,
+      scroll
+    )
+  }
+  copyContinuousCellSample(
+    master,
+    dest,
+    width,
+    sampleX,
+    sampleY,
+    cell.x,
+    cell.y + scroll,
+    cell.width,
+    cell.height - scroll
+  )
+
+  applySmearStyles(dest, width, height, cell, settings, decay, dest, smearEdge)
+  if (isTextureEffect(effect)) {
+    applyTexture(
+      dest,
+      width,
+      height,
+      effect,
+      cell.x,
+      cell.y,
+      cell.width,
+      cell.height
+    )
+  }
+}
+
+/** Cell-sized frame used while building a cache entry — the Cell at its origin. */
+const fixedEntryCellScratch: CachedCell = {
+  x: 0,
+  y: 0,
+  width: 0,
+  height: 0,
+  sx: 0,
+  sy: 0,
+  randomVal: 0,
+}
+
+/**
+ * The cacheable half for one Cell: its Color Master window with the directional
+ * smear already applied, unscrolled, in a Cell-sized buffer.
+ *
+ * Built in its own little frame rather than in place on the canvas — the smear
+ * only ever reads within the Cell, so a Cell-sized frame with the Cell at its
+ * origin produces the identical result, and keeps the entry independent of
+ * wherever it will later be blitted.
+ */
+function resolveFixedCellEntry(
+  cache: FixedCellCache,
+  index: number,
+  master: Uint8ClampedArray,
+  cell: CachedCell,
+  settings: EffectSettings,
+  width: number,
+  height: number,
+  decay: number
+): Uint8ClampedArray {
+  const cached = cache.cells[index]
+  const cellWidth = cell.width
+  const cellHeight = cell.height
+  const byteLength = cellWidth * cellHeight * 4
+  if (cached && cached.length === byteLength) return cached
+
+  const entry = new Uint8ClampedArray(byteLength)
+  const { sampleX, sampleY } = resolveCellSampleOrigin(
+    cell,
+    settings,
+    width,
+    height
+  )
+  const rowBytes = cellWidth * 4
+  for (let row = 0; row < cellHeight; row++) {
+    const srcStart = ((sampleY + row) * width + sampleX) * 4
+    entry.set(master.subarray(srcStart, srcStart + rowBytes), row * rowBytes)
+  }
+
+  const whole = fixedEntryCellScratch
+  whole.x = 0
+  whole.y = 0
+  whole.width = cellWidth
+  whole.height = cellHeight
+  whole.sx = 0
+  whole.sy = 0
+  whole.randomVal = cell.randomVal
+  applyDirectionalSmearPass(
+    entry,
+    cellWidth,
+    cellHeight,
+    whole,
+    settings,
+    decay,
+    entry,
+    "wrap"
+  )
+
+  cache.cells[index] = entry
+  return entry
+}
+
+/**
+ * Blit a cached entry into the canvas, rotated down by `scroll`.
+ * Output row r shows entry row (r − scroll) mod height — the same two bands the
+ * uncached path reads from the master, which is what makes the two agree.
+ * Row-at-a-time `set` calls, so this is a memcpy per row rather than per pixel.
+ */
+function blitRotatedCellEntry(
+  entry: Uint8ClampedArray,
+  dest: Uint8ClampedArray,
+  cell: CachedCell,
+  scroll: number,
+  fullWidth: number
+) {
+  const cellWidth = cell.width
+  const cellHeight = cell.height
+  const rowBytes = cellWidth * 4
+  for (let row = 0; row < cellHeight; row++) {
+    const srcRow = row < scroll ? cellHeight - scroll + row : row - scroll
+    const srcStart = srcRow * rowBytes
+    dest.set(
+      entry.subarray(srcStart, srcStart + rowBytes),
+      ((cell.y + row) * fullWidth + cell.x) * 4
+    )
+  }
+}
+
+/**
  * Hybrid cell loop: assign → copy Color Master window → smear → texture.
  * Dest starts as the original master (OFF Cells stay Normal).
+ *
+ * Live Play never touches Phase 1: the layout, the mask, the effect assignment
+ * and the smear roll are exactly what a static frame would use, and the Cell
+ * rectangles hold still in both modes. All that animates is the contents of each
+ * Cell, scrolling downward and wrapping at that Cell's own borders — plus how
+ * the smear responds to it, which is the whole difference between the modes.
  */
 function applyHybridCells(
   dest: Uint8ClampedArray,
@@ -384,10 +638,14 @@ function applyHybridCells(
   width: number,
   height: number,
   decay: number,
+  offsetY: number,
+  mode: LivePlayMode,
+  cache: FixedCellCache | null,
   jobId?: number
 ) {
   const cells = layout.cells
   const baseCellSize = layout.baseCellSize
+  const smearEdge: SmearEdge = mode === "dynamic" ? "clamp" : "wrap"
   dest.set(masters.original)
 
   for (let i = 0; i < cells.length; i++) {
@@ -397,36 +655,50 @@ function applyHybridCells(
 
     const effect = chooseEffect(cell.randomVal, settings)
     const master = masterForName(masters, colorMasterForEffect(effect))
-    const { sampleX, sampleY } = resolveCellSampleOrigin(
-      cell,
-      settings,
-      width,
-      height
-    )
-    copyContinuousCellSample(
-      master,
-      dest,
-      width,
-      sampleX,
-      sampleY,
-      cell.x,
-      cell.y,
-      cell.width,
-      cell.height
-    )
-    applySmearStyles(dest, width, height, cell, settings, decay)
-    if (isTextureEffect(effect)) {
-      applyTexture(
-        dest,
+    const scroll = wrapOffset(offsetY, cell.height)
+
+    if (cache && cell.width > 0 && cell.height > 0) {
+      const entry = resolveFixedCellEntry(
+        cache,
+        i,
+        master,
+        cell,
+        settings,
         width,
         height,
-        effect,
-        cell.x,
-        cell.y,
-        cell.width,
-        cell.height
+        decay
       )
+      blitRotatedCellEntry(entry, dest, cell, scroll, width)
+      // The two halves that cannot ride along with a scroll, re-run on the
+      // rotated pixels exactly where the uncached path would have run them.
+      applyRecursiveSmearPass(dest, width, height, cell, settings, decay, "wrap")
+      if (isTextureEffect(effect)) {
+        applyTexture(
+          dest,
+          width,
+          height,
+          effect,
+          cell.x,
+          cell.y,
+          cell.width,
+          cell.height
+        )
+      }
+      continue
     }
+
+    paintCell(
+      dest,
+      master,
+      cell,
+      scroll,
+      effect,
+      settings,
+      width,
+      height,
+      decay,
+      smearEdge
+    )
   }
 }
 
@@ -442,6 +714,9 @@ function drawNormalEffects(
   settings: EffectSettings,
   width: number,
   height: number,
+  offsetY = 0,
+  mode: LivePlayMode = "fixed",
+  live = false,
   jobId?: number
 ) {
   throwIfStale(jobId)
@@ -465,6 +740,16 @@ function drawNormalEffects(
   // Nothing else drops these once the gate stops rebuilding them, so at weight 0
   // the last master and field would sit resident until the next source swap.
   if (!slitScanActive) releaseSlitScanCaches()
+
+  /**
+   * The Cell cache serves live Fixed-mode frames only. Anything else — a slider,
+   * Random, a Bake, a Dynamic frame — drops it, so a stale entry can never reach
+   * the canvas, and a paused session stops holding the memory. Later Repeat
+   * passes are never cached either: they build throwaway masters from the
+   * previous pass's output, which changes on every frame of playback.
+   */
+  const cacheEligible = live && mode === "fixed"
+  if (!cacheEligible) clearFixedCellCache()
 
   let passLayout = layout
   let passMasters: ColorMasters = withSlitScanMaster(
@@ -501,6 +786,10 @@ function drawNormalEffects(
       passLayout = generateLayout(passSettings, width, height)
     }
     const decay = Math.pow(rate / 100, i)
+    const passCache =
+      cacheEligible && i === 0
+        ? resolveFixedCellCache(settings, width, height, passLayout.cells.length)
+        : null
     applyHybridCells(
       dest,
       passMasters,
@@ -509,6 +798,9 @@ function drawNormalEffects(
       width,
       height,
       decay,
+      offsetY,
+      mode,
+      passCache,
       jobId
     )
   }
@@ -522,6 +814,9 @@ function drawComposite(
   settings: EffectSettings,
   width: number,
   height: number,
+  offsetY = 0,
+  mode: LivePlayMode = "fixed",
+  live = false,
   jobId?: number
 ) {
   if (settings.showCellLayout) {
@@ -534,7 +829,17 @@ function drawComposite(
     return
   }
 
-  drawNormalEffects(ctx, layout, settings, width, height, jobId)
+  drawNormalEffects(
+    ctx,
+    layout,
+    settings,
+    width,
+    height,
+    offsetY,
+    mode,
+    live,
+    jobId
+  )
 }
 
 function compositeCells(
@@ -542,10 +847,23 @@ function compositeCells(
   settings: EffectSettings,
   width: number,
   height: number,
+  offsetY: number,
+  mode: LivePlayMode,
+  live: boolean,
   jobId?: number
 ): ImageBitmap {
   const ctx = ensureWorkSurface(width, height)
-  drawComposite(ctx, layout, settings, width, height, jobId)
+  drawComposite(
+    ctx,
+    layout,
+    settings,
+    width,
+    height,
+    offsetY,
+    mode,
+    live,
+    jobId
+  )
 
   const bitmap = workCanvas!.transferToImageBitmap()
   workCanvas = null
@@ -570,7 +888,13 @@ function resolveLayout(settings: EffectSettings, width: number, height: number) 
   return layout
 }
 
-function renderFrame(jobId: number, settings: EffectSettings) {
+function renderFrame(
+  jobId: number,
+  settings: EffectSettings,
+  offsetY: number,
+  mode: LivePlayMode,
+  live: boolean
+) {
   if (!cachedSource || !baseMasters) {
     post({ type: "error", jobId, message: "No source image cached in worker" })
     return
@@ -587,7 +911,16 @@ function renderFrame(jobId: number, settings: EffectSettings) {
   let bitmap: ImageBitmap
   try {
     const layout = resolveLayout(settings, width, height)
-    bitmap = compositeCells(layout, settings, width, height, jobId)
+    bitmap = compositeCells(
+      layout,
+      settings,
+      width,
+      height,
+      offsetY,
+      mode,
+      live,
+      jobId
+    )
   } catch (err) {
     if (err instanceof Error && err.message === "__cancelled__") {
       post({ type: "cancelled", jobId })
@@ -620,7 +953,13 @@ function renderFrame(jobId: number, settings: EffectSettings) {
 }
 
 let renderPumpRunning = false
-let queuedRender: { jobId: number; settings: EffectSettings } | null = null
+let queuedRender: {
+  jobId: number
+  settings: EffectSettings
+  offsetY: number
+  mode: LivePlayMode
+  live: boolean
+} | null = null
 
 function pumpRenders() {
   if (renderPumpRunning) return
@@ -630,7 +969,7 @@ function pumpRenders() {
       const job = queuedRender
       queuedRender = null
       if (job.jobId !== activeJobId) continue
-      renderFrame(job.jobId, job.settings)
+      renderFrame(job.jobId, job.settings, job.offsetY, job.mode, job.live)
     }
   } finally {
     renderPumpRunning = false
@@ -658,6 +997,7 @@ self.onmessage = (event: MessageEvent<EffectWorkerInMessage>) => {
     }
     cachedSource = msg.bitmap
     clearLayoutCache()
+    clearFixedCellCache()
     rebuildColorMasters(msg.bitmap)
     workImageData = null
     return
@@ -671,6 +1011,7 @@ self.onmessage = (event: MessageEvent<EffectWorkerInMessage>) => {
       cachedSource = null
     }
     clearLayoutCache()
+    clearFixedCellCache()
     clearColorMasters()
     workCanvas = null
     workCtx = null
@@ -689,8 +1030,16 @@ self.onmessage = (event: MessageEvent<EffectWorkerInMessage>) => {
       })
       return
     }
+    // Untrusted like the settings beside it: anything non-finite is a static frame.
+    const offsetY =
+      typeof msg.offsetY === "number" && Number.isFinite(msg.offsetY)
+        ? msg.offsetY
+        : 0
+    const mode: LivePlayMode =
+      msg.livePlayMode === "dynamic" ? "dynamic" : "fixed"
+    const live = msg.live === true
     activeJobId = msg.jobId
-    queuedRender = { jobId: msg.jobId, settings }
+    queuedRender = { jobId: msg.jobId, settings, offsetY, mode, live }
     pumpRenders()
     return
   }

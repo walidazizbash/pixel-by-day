@@ -1,6 +1,7 @@
 "use client"
 
 import type { Dispatch, SetStateAction } from "react"
+import { memo } from "react"
 import { CollapsibleCallout } from "@/components/collapsible-callout"
 import { Slider } from "@/components/ui/slider"
 import { Switch } from "@/components/ui/switch"
@@ -18,7 +19,7 @@ type PostProcessingSectionProps = {
 /**
  * Post-Process: the Phase 3 grain pass, which runs in its own worker.
  */
-export function PostProcessingSection({
+export const PostProcessingSection = memo(function PostProcessingSection({
   textureEnabled,
   setTextureEnabled,
   textureOpacity,
@@ -85,4 +86,4 @@ export function PostProcessingSection({
       )}
     </CollapsibleCallout>
   )
-}
+})
