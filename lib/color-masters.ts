@@ -11,7 +11,19 @@ export type ColorMasters = {
   invert: Uint8ClampedArray
   surreal: Uint8ClampedArray
   thermal: Uint8ClampedArray
+  slitscan: Uint8ClampedArray
 }
+
+/**
+ * The four masters derived from pixel content alone.
+ *
+ * Slit Scan is deliberately absent. It is the one master driven by
+ * `EffectSettings`, which do not exist yet when the worker builds these in its
+ * `setSource` handler. The worker attaches it per render via
+ * `withSlitScanMaster`, behind the params cache in `lib/slit-scan.ts`, so an
+ * unrelated slider drag reuses the master instead of rebuilding it.
+ */
+export type BaseColorMasters = Omit<ColorMasters, "slitscan">
 
 const SURREAL_R = new Uint8ClampedArray(256)
 const SURREAL_G = new Uint8ClampedArray(256)
@@ -54,19 +66,27 @@ function buildSurrealMaster(
   return out
 }
 
-/** Eager-build all four Color Masters. No lazy / weight gates. */
-export function buildColorMasters(
+/** Eager-build the four content-derived masters. No lazy / weight gates. */
+export function buildBaseColorMasters(
   sourceRgba: Uint8ClampedArray,
   width: number,
   height: number,
   blurHeat: HeatBlurFn
-): ColorMasters {
+): BaseColorMasters {
   return {
     original: buildNormalMaster(sourceRgba),
     invert: buildInvertMaster(sourceRgba),
     surreal: buildSurrealMaster(sourceRgba),
     thermal: buildThermalMaster(sourceRgba, width, height, blurHeat),
   }
+}
+
+/** Complete the set for one render with the Slit Scan master the worker resolved. */
+export function withSlitScanMaster(
+  base: BaseColorMasters,
+  slitscan: Uint8ClampedArray
+): ColorMasters {
+  return { ...base, slitscan }
 }
 
 export function masterForName(

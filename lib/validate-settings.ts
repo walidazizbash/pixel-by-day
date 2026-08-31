@@ -1,6 +1,7 @@
 import type {
   CompositeTextureSettings,
   EffectSettings,
+  SlitScanMode,
   SmearStyleSettings,
 } from "@/lib/effect-types"
 import type { SubdivisionMode } from "@/lib/layout-types"
@@ -24,6 +25,17 @@ function asBool(value: unknown, fallback: boolean): boolean {
 
 function asSubdivisionMode(value: unknown): SubdivisionMode {
   return value === "frontier" || value === "global" ? value : "frontier"
+}
+
+function asSlitScanMode(value: unknown): SlitScanMode {
+  switch (value) {
+    case "horizontal":
+    case "vertical":
+    case "noise":
+      return value
+    default:
+      return "noise"
+  }
 }
 
 function sanitizeSmear(
@@ -71,7 +83,7 @@ export function sanitizeEffectSettings(raw: unknown): EffectSettings | null {
     recursiveWeight: clampNum(s.recursiveWeight, 0, 100, 50),
     noiseScale: clampNum(s.noiseScale, 1, 100, 19),
     noiseSpread: clampNum(s.noiseSpread, 0, 100, 50),
-    maxCellSize: clampNum(s.maxCellSize, 1, 100, 20) | 0,
+
     subdivisionLoops: clampNum(s.subdivisionLoops, 1, 7, 4) | 0,
     subdivisionMode: asSubdivisionMode(s.subdivisionMode),
     subdivisionRate: clampNum(s.subdivisionRate, 10, 100, 60),
@@ -83,6 +95,11 @@ export function sanitizeEffectSettings(raw: unknown): EffectSettings | null {
     textureOpacity: clampNum(s.textureOpacity, 0, 1, 1),
     halftoneAmount: clampNum(s.halftoneAmount, 0, 100, 0),
     weightThermal: clampNum(s.weightThermal, 0, 100, 0),
+    weightSlitScan: clampNum(s.weightSlitScan, 0, 100, 0),
+    slitScanAmount: clampNum(s.slitScanAmount, 0, 100, 50),
+    slitScanFrequency: clampNum(s.slitScanFrequency, 0, 100, 50),
+    slitScanMode: asSlitScanMode(s.slitScanMode),
+    slitScanLuminanceMask: asBool(s.slitScanLuminanceMask, false),
   }
 }
 

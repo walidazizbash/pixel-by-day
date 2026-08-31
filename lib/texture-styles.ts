@@ -37,14 +37,14 @@ function applyDither(
       const qLocalY = Math.min(height - 1, Math.max(0, qAbsY - cellY))
       const qIndex = ((cellY + qLocalY) * fullWidth + (cellX + qLocalX)) * 4
 
-      const r = data[qIndex]
-      const g = data[qIndex + 1]
-      const b = data[qIndex + 2]
+      const r = data[qIndex]!
+      const g = data[qIndex + 1]!
+      const b = data[qIndex + 2]!
       const lum = 0.299 * r + 0.587 * g + 0.114 * b
 
       const scaledX = (absX / scale) | 0
       const scaledY = (absY / scale) | 0
-      const threshold = BAYER_MATRIX[(scaledY & 7) * 8 + (scaledX & 7)]
+      const threshold = BAYER_MATRIX[(scaledY & 7) * 8 + (scaledX & 7)]!
       const v = lum > threshold ? 255 : 0
 
       const i = (absY * fullWidth + absX) * 4
@@ -92,9 +92,9 @@ function applyPixelate(
       )
       const centerIndex = (centerY * fullWidth + centerX) * 4
 
-      const r = quantizeChannel(data[centerIndex], stepFactor)
-      const g = quantizeChannel(data[centerIndex + 1], stepFactor)
-      const b = quantizeChannel(data[centerIndex + 2], stepFactor)
+      const r = quantizeChannel(data[centerIndex]!, stepFactor)
+      const g = quantizeChannel(data[centerIndex + 1]!, stepFactor)
+      const b = quantizeChannel(data[centerIndex + 2]!, stepFactor)
 
       const writeStartY = Math.max(blockY, cellY)
       const writeStartX = Math.max(blockX, cellX)
@@ -141,7 +141,7 @@ function applyHalftone(
         const row = (gy + y) * fullWidth
         for (let x = 0; x < gw; x++) {
           const i = (row + gx + x) * 4
-          sum += 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2]
+          sum += 0.299 * data[i]! + 0.587 * data[i + 1]! + 0.114 * data[i + 2]!
           count++
         }
       }

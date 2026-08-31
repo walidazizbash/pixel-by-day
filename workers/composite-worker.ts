@@ -26,6 +26,34 @@ let cachedScaledGrain: {
   data: Uint8ClampedArray
 } | null = null
 
+/**
+ * Reused work surface, keyed on frame size. A grain-opacity drag posts one job
+ * per animation frame, and a fresh OffscreenCanvas per job means a full backing
+ * store allocated and thrown away every frame.
+ *
+ * Safe to keep across jobs: `transferToImageBitmap` hands out the contents and
+ * leaves the canvas blank but usable at the same size, and every job overwrites
+ * it with `drawImage` before reading anything back.
+ */
+let workCanvas: OffscreenCanvas | null = null
+let workCtx: OffscreenCanvasRenderingContext2D | null = null
+let workWidth = 0
+let workHeight = 0
+
+function ensureWorkSurface(
+  width: number,
+  height: number
+): OffscreenCanvasRenderingContext2D {
+  if (!workCanvas || workWidth !== width || workHeight !== height) {
+    workCanvas = new OffscreenCanvas(width, height)
+    workCtx = workCanvas.getContext("2d", { willReadFrequently: true })
+    workWidth = width
+    workHeight = height
+  }
+  if (!workCtx) throw new Error("Failed to create Phase 3 canvas")
+  return workCtx
+}
+
 function post(msg: CompositeWorkerOutMessage, transfer?: Transferable[]) {
   ;(self as DedicatedWorkerGlobalScope).postMessage(msg, transfer ?? [])
 }
@@ -84,11 +112,12 @@ async function applyPhase3Grain(
 ): Promise<ImageBitmap> {
   const width = source.width
   const height = source.height
-  const canvas = new OffscreenCanvas(width, height)
-  const ctx = canvas.getContext("2d", { willReadFrequently: true })
-  if (!ctx) throw new Error("Failed to create Phase 3 canvas")
+  const ctx = ensureWorkSurface(width, height)
 
   ctx.drawImage(source, 0, 0)
+  // The one allocation left per job. A 2D context has no read-into-an-existing-
+  // buffer call, so the frame's pixels can only come back in a fresh ImageData;
+  // the canvas, its backing store and the context are now reused.
   const imageData = ctx.getImageData(0, 0, width, height)
   const layoutPixels = imageData.data
   const texturePixels = await ensureScaledGrainData(width, height)
@@ -104,14 +133,14 @@ async function applyPhase3Grain(
   const inv255 = 1 / 255
   for (let i = 0; i < layoutPixels.length; i += 4) {
     const grainLuma =
-      (0.2126 * texturePixels[i] +
-        0.7152 * texturePixels[i + 1] +
-        0.0722 * texturePixels[i + 2]) *
+      (0.2126 * texturePixels[i]! +
+        0.7152 * texturePixels[i + 1]! +
+        0.0722 * texturePixels[i + 2]!) *
       inv255
     const grainDeviation = (grainLuma - 0.5) * 2 * textureOpacity
 
     for (let c = 0; c < 3; c++) {
-      const baseFloat = layoutPixels[i + c] * inv255
+      const baseFloat = layoutPixels[i + c]! * inv255
       const adjustedBase = baseFloat * (1 - lift) + lift
       const finalFloat = adjustedBase + grainDeviation
       layoutPixels[i + c] = Math.max(0, Math.min(255, finalFloat * 255))
@@ -120,7 +149,13 @@ async function applyPhase3Grain(
   }
 
   ctx.putImageData(imageData, 0, 0)
-  return canvas.transferToImageBitmap()
+  return ensureWorkCanvas().transferToImageBitmap()
+}
+
+/** The surface `ensureWorkSurface` built for this job. */
+function ensureWorkCanvas(): OffscreenCanvas {
+  if (!workCanvas) throw new Error("Phase 3 work surface missing")
+  return workCanvas
 }
 
 function isStale(jobId: number) {

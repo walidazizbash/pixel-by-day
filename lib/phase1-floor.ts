@@ -87,17 +87,12 @@ export function extractLayoutParams(
   sourceWidth: number,
   sourceHeight: number
 ): LayoutParams {
-  const maxCellSize = Math.max(
-    STRUCTURAL_MIN_CELL_SIZE,
-    Math.min(20, Number(settings.maxCellSize) || STRUCTURAL_MIN_CELL_SIZE)
-  )
   const subdivisionMode =
     settings.subdivisionMode === "global" ? "global" : "frontier"
   return {
     layoutVersion: LAYOUT_CACHE_VERSION,
     seed: settings.seed,
     randomSample: settings.randomSample,
-    maxCellSize,
     baseCellSize: computeBaseCellSize(sourceWidth, sourceHeight),
     sourceWidth,
     sourceHeight,
@@ -112,7 +107,6 @@ export function layoutParamsEqual(a: LayoutParams, b: LayoutParams) {
     a.layoutVersion === b.layoutVersion &&
     a.seed === b.seed &&
     a.randomSample === b.randomSample &&
-    a.maxCellSize === b.maxCellSize &&
     a.baseCellSize === b.baseCellSize &&
     a.sourceWidth === b.sourceWidth &&
     a.sourceHeight === b.sourceHeight &&
@@ -145,8 +139,8 @@ function rngInt(rng: () => number, minInclusive: number, maxInclusive: number) {
 function shuffleInPlace<T>(items: T[], rng: () => number) {
   for (let i = items.length - 1; i > 0; i--) {
     const j = Math.floor(rng() * (i + 1))
-    const tmp = items[i]
-    items[i] = items[j]
+    const tmp = items[i]!
+    items[i] = items[j]!
     items[j] = tmp
   }
 }
@@ -272,7 +266,7 @@ function anchorsTooClose(
   const cy = gy + span * 0.5
   const minDist = minSeparation
   for (let i = 0; i < anchors.length; i++) {
-    const a = anchors[i]
+    const a = anchors[i]!
     const ax = a.gx + a.span * 0.5
     const ay = a.gy + a.span * 0.5
     const dx = cx - ax
@@ -309,7 +303,7 @@ function placeLargeAnchors(
 
   const tryPass = (enforceSeparation: boolean) => {
     for (let i = 0; i < candidates.length && anchors.length < targetCount; i++) {
-      const { gx, gy } = candidates[i]
+      const { gx, gy } = candidates[i]!
       if (claimed[gy * gridWidth + gx] === 1) continue
       const span = largestFittingSpan(
         claimed,
@@ -398,7 +392,7 @@ function fillExactSizePass(
   shuffleInPlace(candidates, rng)
 
   for (let i = 0; i < candidates.length; i++) {
-    const { gx, gy } = candidates[i]
+    const { gx, gy } = candidates[i]!
     if (claimed[gy * gridWidth + gx] === 1) continue
     if (!canPlaceSquare(claimed, gridWidth, gridHeight, gx, gy, span)) continue
     placeSquare(claimed, cells, gridWidth, gx, gy, span)
@@ -441,7 +435,7 @@ export function verifyFloorCoverage(
 ) {
   const claimed = new Uint8Array(gridWidth * gridHeight)
   for (let i = 0; i < cells.length; i++) {
-    const p = cells[i]
+    const p = cells[i]!
     for (let dy = 0; dy < p.span; dy++) {
       const row = (p.gy + dy) * gridWidth + p.gx
       for (let dx = 0; dx < p.span; dx++) {
@@ -474,7 +468,7 @@ export function verifyPixelCoverage(
 
   const covered = new Uint8Array(imageWidth * imageHeight)
   for (let i = 0; i < layout.length; i++) {
-    const p = layout[i]
+    const p = layout[i]!
     for (let y = p.y; y < p.y + p.height; y++) {
       const row = y * imageWidth
       for (let x = p.x; x < p.x + p.width; x++) {
@@ -496,7 +490,7 @@ export function layoutGeometrySignature(
 ): string {
   const parts = new Array(layout.length)
   for (let i = 0; i < layout.length; i++) {
-    const p = layout[i]
+    const p = layout[i]!
     parts[i] = `${p.x},${p.y},${p.width},${p.height}`
   }
   parts.sort()
@@ -597,7 +591,7 @@ function subdivideCellIntoQuadrants(
 
   const out: CachedCell[] = []
   for (let i = 0; i < rects.length; i++) {
-    const r = rects[i]
+    const r = rects[i]!
     const child = makeSubdivisionCell(
       r.x,
       r.y,
@@ -661,12 +655,12 @@ function generateSubdivisionLayout(
 
     // Preserve Cells that are not in this loop's target pool (frontier mode).
     for (let i = 0; i < cells.length; i++) {
-      const cell = cells[i]
+      const cell = cells[i]!
       if (!targetSet.has(cell)) nextCells.push(cell)
     }
 
     for (let i = 0; i < targetPool.length; i++) {
-      const cell = targetPool[i]
+      const cell = targetPool[i]!
       // Frontier: always open the root on loop 0 so mid-slider cannot collapse
       // to a single Cell when the first RNG roll fails.
       let shouldSubdivide =
@@ -684,8 +678,8 @@ function generateSubdivisionLayout(
           sampleSeed
         )
         for (let q = 0; q < quads.length; q++) {
-          nextCells.push(quads[q])
-          if (mode === "frontier") nextFrontier.push(quads[q])
+          nextCells.push(quads[q]!)
+          if (mode === "frontier") nextFrontier.push(quads[q]!)
         }
       } else {
         nextCells.push(cell)

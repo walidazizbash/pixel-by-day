@@ -13,7 +13,6 @@ export type LayoutParams = {
   layoutVersion: number
   seed: number
   randomSample: boolean
-  maxCellSize: number
   /** Resolution-aware grid unit in pixels. */
   baseCellSize: number
   sourceWidth: number

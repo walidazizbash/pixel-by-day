@@ -4,20 +4,30 @@
  * Color Masters are full-frame RGBA, eager-built once when the source image
  * changes (load / Bake). The render loop never lazily allocates them.
  *
- *   1. INITIALIZATION — Color Masters: original, invert, surreal, thermal
+ *   1. INITIALIZATION — Masters: original, invert, surreal, thermal, slitscan
  *   2. CELL ASSIGNMENT — UI weights → one EffectName per ON Cell
  *   3. PRE-SMEAR — copy from that Cell's Color Master, then smear
  *      Texture-assigned Cells sample the original (Normal) master.
  *   4. POST-SMEAR — dither / halftone / pixelate as textures on smeared pixels
  *
  * Invert / Surreal / Thermal smear already-colored master pixels.
+ * Slit Scan is the one spatial master: it displaces rather than recolors, but
+ * rides the same full-frame RGBA mechanism, so a Cell samples it identically.
  * Dither / Halftone / Pixelate deform Normal pixels, then apply texture.
  */
 
 import type { EffectName, EffectSettings } from "@/lib/effect-types"
 
-/** Full-frame color looks, sampled before smear. */
-export type ColorMasterName = "original" | "invert" | "surreal" | "thermal"
+/**
+ * Full-frame looks sampled before smear. All are RGBA buffers the size of the
+ * frame; `slitscan` is spatial rather than color, but shares the mechanism.
+ */
+export type ColorMasterName =
+  | "original"
+  | "invert"
+  | "surreal"
+  | "thermal"
+  | "slitscan"
 
 /** Mathematical textures, applied after smear. */
 export type TextureEffectName = "dither" | "halftone" | "pixelate"
@@ -29,7 +39,8 @@ function isColorMasterEffect(
     effect === "original" ||
     effect === "invert" ||
     effect === "surreal" ||
-    effect === "thermal"
+    effect === "thermal" ||
+    effect === "slitscan"
   )
 }
 
@@ -75,8 +86,16 @@ export function chooseEffect(
   const wPixelate = settings.weightPixelate
   const wHalftone = settings.halftoneAmount
   const wThermal = settings.weightThermal
+  const wSlitScan = settings.weightSlitScan
   const sumOfWeights =
-    wOriginal + wDither + wInvert + wSurreal + wPixelate + wHalftone + wThermal
+    wOriginal +
+    wDither +
+    wInvert +
+    wSurreal +
+    wPixelate +
+    wHalftone +
+    wThermal +
+    wSlitScan
 
   const effectiveTotal = Math.max(WEIGHT_BASE, sumOfWeights)
   const target = randomVal * effectiveTotal
@@ -86,6 +105,7 @@ export function chooseEffect(
   const afterSurreal = afterInvert + wSurreal
   const afterPixelate = afterSurreal + wPixelate
   const afterHalftone = afterPixelate + wHalftone
+  const afterThermal = afterHalftone + wThermal
 
   if (target < afterOriginal) return "original"
   if (target < afterDither) return "dither"
@@ -93,7 +113,8 @@ export function chooseEffect(
   if (target < afterSurreal) return "surreal"
   if (target < afterPixelate) return "pixelate"
   if (target < afterHalftone) return "halftone"
-  if (target < afterHalftone + wThermal) return "thermal"
+  if (target < afterThermal) return "thermal"
+  if (target < afterThermal + wSlitScan) return "slitscan"
   return "original"
 }
 

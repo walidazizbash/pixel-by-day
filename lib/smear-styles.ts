@@ -92,10 +92,10 @@ function snapshotCell(
     for (let col = 0; col < width; col++) {
       const src = (srcRow + col) * 4
       const tmp = (tmpRow + col) * 4
-      scratch[tmp] = data[src]
-      scratch[tmp + 1] = data[src + 1]
-      scratch[tmp + 2] = data[src + 2]
-      scratch[tmp + 3] = data[src + 3]
+      scratch[tmp] = data[src]!
+      scratch[tmp + 1] = data[src + 1]!
+      scratch[tmp + 2] = data[src + 2]!
+      scratch[tmp + 3] = data[src + 3]!
     }
   }
 }

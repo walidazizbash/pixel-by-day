@@ -9,7 +9,8 @@ export type {
 
 /**
  * Cell assignment names. Color vs texture routing lives in `lib/pipeline.ts`.
- * Color Masters (pre-smear): original, invert, surreal, thermal.
+ * Color Masters (pre-smear): original, invert, surreal, thermal, slitscan.
+ * `slitscan` is spatial rather than color, but shares the master mechanism.
  * Textures (post-smear): dither, halftone, pixelate.
  */
 export type EffectName =
@@ -19,7 +20,21 @@ export type EffectName =
   | "pixelate"
   | "halftone"
   | "thermal"
+  | "slitscan"
   | "original"
+
+/**
+ * Physical shape of the Slit Scan displacement.
+ *
+ *   horizontal  curl field with dy forced to 0 - pixels stretch left/right
+ *   vertical    curl field with dx forced to 0 - pixels stretch up/down
+ *   noise       the full 2D curl field (original behavior)
+ *
+ * Part of `SlitScanParams`, so it sits on the master's invalidation seam.
+ * Brightness is no longer a mode of its own - see `slitScanLuminanceMask`,
+ * which scales any of these by pixel luminance.
+ */
+export type SlitScanMode = "horizontal" | "vertical" | "noise"
 
 /** One smear style: independent enable + signed amount (H/V/D −100…100, recursive 0–100). */
 export type SmearStyleSettings = {
@@ -66,8 +81,7 @@ export type EffectSettings = {
   noiseScale: number
   /** UI 0–100: how much of the grid receives effects (50 = balanced). */
   noiseSpread: number
-  /** UI max structural Cell size (in baseCellSize grid units). */
-  maxCellSize: number
+
   /** Subdivision pass count (1–7). */
   subdivisionLoops: number
   /** Frontier = only newly split Cells; global = all Cells each loop. */
@@ -97,6 +111,21 @@ export type EffectSettings = {
   halftoneAmount: number
   /** UI 0–100 weight for thermal assignment (base-100 coverage; remainder is original). */
   weightThermal: number
+  /** UI 0–100 weight for slit-scan assignment (base-100 coverage; remainder is original). */
+  weightSlitScan: number
+
+  /** UI 0–100 slit-scan displacement strength; worker maps to 0–24.5% of frame height. */
+  slitScanAmount: number
+  /** UI 0–100 slit-scan noise frequency; worker maps exponentially to 1–3.6 cells. */
+  slitScanFrequency: number
+  /** Which physical displacement the Slit Scan master applies. */
+  slitScanMode: SlitScanMode
+  /**
+   * Scale the Slit Scan displacement by each pixel's brightness: white moves
+   * the full vector, black holds still, mid-tones land in between. A modifier
+   * on whichever `slitScanMode` is active, not a mode of its own.
+   */
+  slitScanLuminanceMask: boolean
 }
 
 /** Settings subset consumed by the Phase 3 composite worker. */

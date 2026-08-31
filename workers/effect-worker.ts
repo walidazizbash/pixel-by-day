@@ -4,7 +4,9 @@
  * Hybrid Pipeline.
  *
  *   setSource → eager persistent Color Masters (pass 0)
- *   render    → for i in 0..passes-1:
+ *   render    → resolve the Slit Scan master (rebuilt only when SlitScanParams
+ *               changed — see resolveSlitScanMaster), then
+ *               for i in 0..passes-1:
  *                 layout (cached pass 0; later passes re-layout with seed+i)
  *                 mask → assign → sample Color Master → smear (decay (rate/100)^i)
  *                 post-smear textures (dither / halftone / pixelate)
@@ -29,8 +31,10 @@ import { applySmearStyles } from "@/lib/smear-styles"
 import { applyTexture } from "@/lib/texture-styles"
 import { sanitizeEffectSettings } from "@/lib/validate-settings"
 import {
-  buildColorMasters,
+  buildBaseColorMasters,
   masterForName,
+  withSlitScanMaster,
+  type BaseColorMasters,
   type ColorMasters,
 } from "@/lib/color-masters"
 import {
@@ -39,9 +43,25 @@ import {
   isTextureEffect,
 } from "@/lib/pipeline"
 import { THERMAL_DIFFUSE_SCALE } from "@/lib/thermal"
+import {
+  buildSlitScanMaster,
+  clearSlitScanFieldCache,
+  extractSlitScanParams,
+  slitScanParamsEqual,
+  type SlitScanParams,
+} from "@/lib/slit-scan"
 
 let cachedSource: ImageBitmap | null = null
-let colorMasters: ColorMasters | null = null
+let baseMasters: BaseColorMasters | null = null
+/**
+ * Slit Scan invalidation seam. The master is the one that depends on
+ * `EffectSettings`, so it is resolved per render against this key instead of
+ * being rebuilt with the rest on `setSource`. A drag that touches nothing in
+ * `SlitScanParams` — smear, effect weights, mask, grain — hits the cache and
+ * costs nothing, which is what keeps those sliders at frame rate.
+ */
+let slitScanMaster: Uint8ClampedArray | null = null
+let slitScanKey: SlitScanParams | null = null
 let cachedLayout: CachedLayout | null = null
 let cachedLayoutParams: LayoutParams | null = null
 let activeJobId = 0
@@ -92,8 +112,37 @@ function clearLayoutCache() {
   cachedLayoutParams = null
 }
 
+/**
+ * Hand back the Slit Scan working set: the gathered master and the curl field
+ * behind it. Roughly 11.5 MB at a 1200x800 preview, and both rebuild from
+ * scratch on the first frame that needs them again.
+ */
+function releaseSlitScanCaches() {
+  slitScanMaster = null
+  slitScanKey = null
+  clearSlitScanFieldCache()
+}
+
 function clearColorMasters() {
-  colorMasters = null
+  baseMasters = null
+  releaseSlitScanCaches()
+}
+
+/**
+ * Pass-0 Slit Scan master, rebuilt only when `SlitScanParams` actually moved.
+ * Gathers from `base.original`, which is a copy of the source pixels, so no
+ * separate source buffer has to be retained for this.
+ */
+function resolveSlitScanMaster(
+  base: BaseColorMasters,
+  params: SlitScanParams
+): Uint8ClampedArray {
+  if (slitScanMaster && slitScanKey && slitScanParamsEqual(slitScanKey, params)) {
+    return slitScanMaster
+  }
+  slitScanMaster = buildSlitScanMaster(base.original, params)
+  slitScanKey = params
+  return slitScanMaster
 }
 
 function acquireWorkImageData(
@@ -184,7 +233,10 @@ function rebuildColorMasters(bitmap: ImageBitmap) {
   const width = bitmap.width
   const height = bitmap.height
   const sourceRgba = readSourceRgba(bitmap, width, height)
-  colorMasters = buildColorMasters(sourceRgba, width, height, blurHeatField)
+  baseMasters = buildBaseColorMasters(sourceRgba, width, height, blurHeatField)
+  // New pixels: the cached Slit Scan master describes the old ones.
+  slitScanMaster = null
+  slitScanKey = null
 }
 
 /** Fixed Phase 2 mask contrast — keeps organic ON/OFF regions sharp. */
@@ -233,7 +285,7 @@ function drawCellNoiseMapDebug(
   ctx.fillStyle = "#ffffff"
 
   for (let i = 0; i < cells.length; i++) {
-    const cell = cells[i]
+    const cell = cells[i]!
     const w = cell.width
     const h = cell.height
     if (w < 1 || h < 1) continue
@@ -254,7 +306,7 @@ function drawCellLayoutDebug(
 
   ctx.lineWidth = 1
   for (let i = 0; i < layout.length; i++) {
-    const cell = layout[i]
+    const cell = layout[i]!
     const w = cell.width
     const h = cell.height
     if (w < 1 || h < 1) continue
@@ -312,10 +364,10 @@ function copyContinuousCellSample(
     for (let col = 0; col < cellWidth; col++) {
       const s = (srcRow + col) * 4
       const d = (dstRow + col) * 4
-      dest[d] = source[s]
-      dest[d + 1] = source[s + 1]
-      dest[d + 2] = source[s + 2]
-      dest[d + 3] = source[s + 3]
+      dest[d] = source[s]!
+      dest[d + 1] = source[s + 1]!
+      dest[d + 2] = source[s + 2]!
+      dest[d + 3] = source[s + 3]!
     }
   }
 }
@@ -340,7 +392,7 @@ function applyHybridCells(
 
   for (let i = 0; i < cells.length; i++) {
     if (jobId !== undefined) throwIfStale(jobId)
-    const cell = cells[i]
+    const cell = cells[i]!
     if (!sampleCellMask(cell, settings, baseCellSize)) continue
 
     const effect = chooseEffect(cell.randomVal, settings)
@@ -393,15 +445,34 @@ function drawNormalEffects(
   jobId?: number
 ) {
   throwIfStale(jobId)
-  if (!colorMasters) throw new Error("Color Masters missing")
+  if (!baseMasters) throw new Error("Color Masters missing")
 
   const passCount = Math.max(1, Math.min(3, settings.passes | 0))
   const rate = Math.max(0, Math.min(100, Number(settings.rate) || 0))
   const imageData = acquireWorkImageData(ctx, width, height)
   const dest = imageData.data
 
+  const slitScanParams = extractSlitScanParams(settings, width, height)
+  /**
+   * At weight 0 no Cell can be assigned Slit Scan: `chooseEffect`'s bucket for
+   * it is empty, so that branch is unreachable and the master is never sampled.
+   * Building it anyway costs a field build plus a full-frame gather on every
+   * seed change - which Random rolls on every click, and every Repeat pass
+   * repeats. Alias the slot to the original master instead: a reference, not a
+   * copy, and it reads as an untouched frame if anything ever does sample it.
+   */
+  const slitScanActive = settings.weightSlitScan > 0
+  // Nothing else drops these once the gate stops rebuilding them, so at weight 0
+  // the last master and field would sit resident until the next source swap.
+  if (!slitScanActive) releaseSlitScanCaches()
+
   let passLayout = layout
-  let passMasters: ColorMasters = colorMasters
+  let passMasters: ColorMasters = withSlitScanMaster(
+    baseMasters,
+    slitScanActive
+      ? resolveSlitScanMaster(baseMasters, slitScanParams)
+      : baseMasters.original
+  )
 
   for (let i = 0; i < passCount; i++) {
     throwIfStale(jobId)
@@ -409,11 +480,23 @@ function drawNormalEffects(
       i > 0 ? { ...settings, seed: settings.seed + i } : settings
     if (i > 0) {
       const prevFrame = new Uint8ClampedArray(dest)
-      passMasters = buildColorMasters(
+      const passBase = buildBaseColorMasters(
         prevFrame,
         width,
         height,
         blurHeatField
+      )
+      // Throwaway, exactly like the other masters on a later pass: the pixels
+      // differ every frame, so this never reads or writes the pass-0 cache.
+      // Only the gather runs — the field is still cached by params.
+      passMasters = withSlitScanMaster(
+        passBase,
+        slitScanActive
+          ? buildSlitScanMaster(passBase.original, {
+              ...slitScanParams,
+              seed: passSettings.seed,
+            })
+          : passBase.original
       )
       passLayout = generateLayout(passSettings, width, height)
     }
@@ -488,7 +571,7 @@ function resolveLayout(settings: EffectSettings, width: number, height: number) 
 }
 
 function renderFrame(jobId: number, settings: EffectSettings) {
-  if (!cachedSource || !colorMasters) {
+  if (!cachedSource || !baseMasters) {
     post({ type: "error", jobId, message: "No source image cached in worker" })
     return
   }

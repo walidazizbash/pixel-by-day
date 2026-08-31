@@ -49,7 +49,7 @@ function baseSettings(
     recursiveWeight: 100,
     noiseScale: 30,
     noiseSpread: 50,
-    maxCellSize: 10,
+
     subdivisionLoops: 3,
     subdivisionMode: "frontier",
     subdivisionRate: 60,
@@ -61,6 +61,11 @@ function baseSettings(
     textureOpacity: 1,
     halftoneAmount: 0,
     weightThermal: 0,
+    weightSlitScan: 0,
+    slitScanAmount: 50,
+    slitScanFrequency: 50,
+    slitScanMode: "noise",
+    slitScanLuminanceMask: false,
     ...overrides,
   }
 }
@@ -91,7 +96,7 @@ function main() {
   // Ideal visual baseline: ~1000px max edge → 10 pixel base cell size (~100 across).
   const width = 1000
   const height = 800
-  const settings = baseSettings({ seed: 42, maxCellSize: 10 })
+  const settings = baseSettings({ seed: 42 })
   const results: CheckResult[] = []
 
   results.push(
@@ -103,10 +108,10 @@ function main() {
       assert(sigA === sigB, "geometry signatures differ across identical runs")
       assert(a.length === b.length, "cell counts differ")
       for (let i = 0; i < a.length; i++) {
-        assert(a[i].x === b[i].x, `x mismatch at ${i}`)
-        assert(a[i].y === b[i].y, `y mismatch at ${i}`)
-        assert(a[i].width === b[i].width, `width mismatch at ${i}`)
-        assert(a[i].height === b[i].height, `height mismatch at ${i}`)
+        assert(a[i]!.x === b[i]!.x, `x mismatch at ${i}`)
+        assert(a[i]!.y === b[i]!.y, `y mismatch at ${i}`)
+        assert(a[i]!.width === b[i]!.width, `width mismatch at ${i}`)
+        assert(a[i]!.height === b[i]!.height, `height mismatch at ${i}`)
       }
       return `${a.length} cells, signature length ${sigA.length}`
     })
@@ -300,7 +305,7 @@ function main() {
         height
       )
       assert(layoutParamsEqual(pa, pb), "layout params should ignore noiseSpread")
-      assert(pa.maxCellSize === settings.maxCellSize, "maxCellSize missing")
+
       assert(pa.baseCellSize === 10, "baseCellSize missing from LayoutParams")
       return "geometry + LayoutParams unchanged"
     })

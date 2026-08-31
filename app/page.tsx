@@ -1,16 +1,45 @@
 "use client";
 
-import { ChevronDown, ChevronLeft, ChevronRight, ChevronUp, RotateCcw, X } from "lucide-react"
+/**
+ * App shell and orchestrator.
+ *
+ * Owns the settings state, the History and Random stacks, the blob-URL lifecycle and
+ * the two worker hooks, then hands each region of the UI the exact props it needs.
+ * Deliberately not a Context: a provider holding the settings object would re-render
+ * every panel on every slider tick, which is the thing the split exists to avoid.
+ */
+
 import { useCallback, useEffect, useRef, useState } from "react"
-import { Button } from "@/components/ui/button"
-import { CollapsibleCallout } from "@/components/collapsible-callout"
-import { Slider } from "@/components/ui/slider"
-import { Switch } from "@/components/ui/switch"
 import type {
   EffectSettings,
+  SlitScanMode,
   SmearStyleSettings,
   SubdivisionMode,
 } from "@/lib/effect-types"
+import { BakeDialog } from "@/components/BakeDialog"
+import { CanvasViewport } from "@/components/canvas/CanvasViewport"
+import { HeaderControls } from "@/components/canvas/HeaderControls"
+import { BaseEffectsSection } from "@/components/controls/BaseEffectsSection"
+import { LayoutSection } from "@/components/controls/LayoutSection"
+import { NoiseMaskSection } from "@/components/controls/NoiseMaskSection"
+import { PostProcessingSection } from "@/components/controls/PostProcessingSection"
+import { RepeatSection } from "@/components/controls/RepeatSection"
+import { SmearsSection } from "@/components/controls/SmearsSection"
+import { HistoryFilmstrip } from "@/components/history/HistoryFilmstrip"
+import type { HistorySnapshot } from "@/components/history/types"
+import {
+  CONTROL_DEFAULTS,
+  DEFAULT_SEED,
+  SLIT_SCAN_MODE_DEFAULT,
+  SMEAR_AMOUNT_DEFAULTS,
+  SMEAR_WEIGHT_DEFAULTS,
+} from "@/components/controls/defaults"
+import {
+  floatingCard,
+  footerLink,
+  footerText,
+  pageTitle,
+} from "@/components/controls/styles"
 import { MAX_DECODE_EDGE, MAX_DECODE_PIXELS } from "@/lib/constants"
 import { useAppWorkers } from "@/hooks/useAppWorkers"
 import { cn } from "@/lib/utils"
@@ -22,12 +51,6 @@ const ALLOWED_IMAGE_TYPES = new Set([
   "image/gif",
 ])
 const MAX_UPLOAD_BYTES = 40 * 1024 * 1024
-
-function sliderValue(value: number | readonly number[], fallback = 0) {
-  const raw = Array.isArray(value) ? value[0] : value
-  const n = typeof raw === "number" ? raw : Number(raw)
-  return Number.isFinite(n) ? n : fallback
-}
 
 /** Inclusive integer roll in [min, max]. */
 function randInt(min: number, max: number) {
@@ -66,6 +89,9 @@ const RANDOM_RANGES = {
   weightPixelate: { min: 20, max: 70 },
   halftoneAmount: { min: 0, max: 70, zeroChance: 0.5 },
   weightThermal: { min: 0, max: 70, zeroChance: 0.5 },
+  weightSlitScan: { min: 0, max: 70, zeroChance: 0.5 },
+  slitScanAmount: { min: 20, max: 85 },
+  slitScanFrequency: { min: 15, max: 75 },
   randomSampleChance: 0.35,
   subdivisionModeFrontierChance: 0.5,
 } as const
@@ -102,26 +128,9 @@ function defaultSmear(enabled: boolean, amount = 50): SmearStyleSettings {
 /** Soft cap — each entry is a tiny settings object (~1KB), not bitmaps. */
 const MAX_AUTO_FILL_HISTORY = 40
 
-/** A user-captured snapshot of the current result, shown in the History sidebar. */
-interface HistorySnapshot {
-  id: string
-  /** Small JPEG data URL used as the sidebar thumbnail. */
-  thumbnail: string
-  /**
-   * Full-resolution PNG blob URL of the canvas at capture time — what the preview modal
-   * displays. Never show `thumbnail` there; it's a 150px JPEG and looks awful scaled up.
-   */
-  previewSrc: string | null
-  imageSrc: string | null
-  /** Carries `seed` too — never store it separately or the two can drift. */
-  effectSettings: EffectSettings
-}
-
 /** Soft cap on saved thumbnails — each one embeds image data, so keep this small. */
 const MAX_VISUAL_HISTORY = 10
 const HISTORY_THUMBNAIL_WIDTH = 150
-/** Pixels the History column scrolls per chevron press. */
-const HISTORY_SCROLL_STEP = 200
 
 /**
  * Keep at most `MAX_VISUAL_HISTORY` snapshots, plus the one currently open in
@@ -170,46 +179,6 @@ function cloneEffectSettings(settings: EffectSettings): EffectSettings {
   }
 }
 
-/** Default Amount values for Smear reset buttons (UI slider only). */
-const SMEAR_AMOUNT_DEFAULTS = {
-  vertical: 25,
-  horizontal: 25,
-  diagonal1: 25,
-  diagonal2: 25,
-  recursive: 25,
-} as const
-
-/** Default Weight values for Smear (base-100 coverage; 50 = half of ON Cells when alone). */
-const SMEAR_WEIGHT_DEFAULTS = {
-  vertical: 50,
-  horizontal: 50,
-  diagonal1: 50,
-  diagonal2: 50,
-  recursive: 50,
-} as const
-
-/** Default values for all other control sliders. */
-const CONTROL_DEFAULTS = {
-  maxCellSize: 20,
-  subdivisionLoops: 4,
-  subdivisionRate: 60,
-  noiseScale: 19,
-  noiseSpread: 50,
-  weightPixelate: 0,
-  weightInvert: 30,
-  weightSurreal: 20,
-  weightDither: 0,
-  weightOriginal: 25,
-  textureOpacity: 1,
-  passes: 1,
-  rate: 50,
-  halftoneAmount: 0,
-  weightThermal: 0,
-} as const
-
-/** Default global seed (matches initial page state). */
-const DEFAULT_SEED = 20599
-
 function buildDefaultEffectSettings(): EffectSettings {
   return {
     seed: DEFAULT_SEED,
@@ -231,7 +200,6 @@ function buildDefaultEffectSettings(): EffectSettings {
     recursiveWeight: SMEAR_WEIGHT_DEFAULTS.recursive,
     noiseScale: CONTROL_DEFAULTS.noiseScale,
     noiseSpread: CONTROL_DEFAULTS.noiseSpread,
-    maxCellSize: CONTROL_DEFAULTS.maxCellSize,
     subdivisionLoops: CONTROL_DEFAULTS.subdivisionLoops,
     subdivisionMode: "frontier",
     subdivisionRate: CONTROL_DEFAULTS.subdivisionRate,
@@ -243,6 +211,11 @@ function buildDefaultEffectSettings(): EffectSettings {
     textureOpacity: CONTROL_DEFAULTS.textureOpacity,
     halftoneAmount: CONTROL_DEFAULTS.halftoneAmount,
     weightThermal: CONTROL_DEFAULTS.weightThermal,
+    weightSlitScan: CONTROL_DEFAULTS.weightSlitScan,
+    slitScanAmount: CONTROL_DEFAULTS.slitScanAmount,
+    slitScanFrequency: CONTROL_DEFAULTS.slitScanFrequency,
+    slitScanMode: SLIT_SCAN_MODE_DEFAULT,
+    slitScanLuminanceMask: false,
   }
 }
 
@@ -262,7 +235,8 @@ function buildDefaultEffectSettings(): EffectSettings {
  *
  *   1. `randomSample: false` → `resolveCellSampleOrigin` returns the Cell's own origin,
  *      and `copyContinuousCellSample` early-returns when source and dest coincide.
- *   2. All seven effect weights (five + `halftoneAmount` + `weightThermal`) at 0 →
+ *   2. All eight effect weights (five + `halftoneAmount` + `weightThermal` +
+ *      `weightSlitScan`) at 0 →
  *      `chooseEffect` has an empty pool; base-100 padding fall-through returns
  *      "original". `copyContinuousCellSample` then copies the original Color Master
  *      onto dest, which already holds that master at a matching origin, so pixels
@@ -316,10 +290,6 @@ function buildNeutralEffectSettings(current: EffectSettings): EffectSettings {
     // Noise Mask callout — carried over.
     noiseScale: current.noiseScale,
     noiseSpread: current.noiseSpread,
-    // No control and no setter — `effectSettings` always reads this straight from
-    // CONTROL_DEFAULTS, so any other value here would be one the app can never hold and
-    // would only misreport itself into Random's undo stack.
-    maxCellSize: CONTROL_DEFAULTS.maxCellSize,
     // Cell Pattern callout — carried over.
     subdivisionLoops: current.subdivisionLoops,
     subdivisionMode: current.subdivisionMode,
@@ -335,6 +305,15 @@ function buildNeutralEffectSettings(current: EffectSettings): EffectSettings {
     textureOpacity: current.textureOpacity,
     halftoneAmount: 0,
     weightThermal: 0,
+    weightSlitScan: 0,
+    // Shape params go back to their defaults rather than 0, same reasoning as
+    // the Smear Weights above: they only shape Cells that rolled Slit Scan, and
+    // at weight 0 none do. Zeroing slitScanAmount would also be a value the
+    // Reset button can never produce.
+    slitScanAmount: CONTROL_DEFAULTS.slitScanAmount,
+    slitScanFrequency: CONTROL_DEFAULTS.slitScanFrequency,
+    slitScanMode: SLIT_SCAN_MODE_DEFAULT,
+    slitScanLuminanceMask: false,
   }
 }
 
@@ -353,6 +332,11 @@ function buildToolbarResetSettings(current: EffectSettings): EffectSettings {
     weightOriginal: 0,
     halftoneAmount: 0,
     weightThermal: 0,
+    weightSlitScan: 0,
+    slitScanAmount: CONTROL_DEFAULTS.slitScanAmount,
+    slitScanFrequency: CONTROL_DEFAULTS.slitScanFrequency,
+    slitScanMode: SLIT_SCAN_MODE_DEFAULT,
+    slitScanLuminanceMask: false,
     randomSample: false,
     smearVertical: { enabled: false, amount: 0 },
     smearHorizontal: { enabled: false, amount: 0 },
@@ -372,28 +356,6 @@ function buildToolbarResetSettings(current: EffectSettings): EffectSettings {
     showNoiseMap: false,
     showCellLayout: false,
   }
-}
-
-function ResetAmountButton({
-  label,
-  defaultValue,
-  onReset,
-}: {
-  label: string
-  defaultValue: number
-  onReset: () => void
-}) {
-  return (
-    <button
-      type="button"
-      aria-label={`Reset ${label} to ${defaultValue}`}
-      title="Reset to default"
-      onClick={onReset}
-      className="inline-flex size-8 shrink-0 items-center justify-center rounded-md text-slate-400 transition-colors hover:bg-white/5 hover:text-slate-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-400/40"
-    >
-      <RotateCcw className="size-3.5" strokeWidth={2} aria-hidden />
-    </button>
-  )
 }
 
 function isAllowedImageFile(file: File) {
@@ -505,6 +467,22 @@ export default function Home() {
   const [weightThermal, setWeightThermal] = useState<number>(
     CONTROL_DEFAULTS.weightThermal
   )
+  const [weightSlitScan, setWeightSlitScan] = useState<number>(
+    CONTROL_DEFAULTS.weightSlitScan
+  )
+  const [slitScanAmount, setSlitScanAmount] = useState<number>(
+    CONTROL_DEFAULTS.slitScanAmount
+  )
+  const [slitScanFrequency, setSlitScanFrequency] = useState<number>(
+    CONTROL_DEFAULTS.slitScanFrequency
+  )
+  const [slitScanEnabled, setSlitScanEnabled] = useState(
+    CONTROL_DEFAULTS.weightSlitScan > 0
+  )
+  const [slitScanMode, setSlitScanMode] = useState<SlitScanMode>(
+    SLIT_SCAN_MODE_DEFAULT
+  )
+  const [slitScanLuminanceMask, setSlitScanLuminanceMask] = useState(false)
   const [autoFillHistory, setAutoFillHistory] = useState<EffectSettings[]>(() => [
     cloneEffectSettings(buildDefaultEffectSettings()),
   ])
@@ -564,7 +542,6 @@ export default function Home() {
     recursiveWeight,
     noiseScale,
     noiseSpread,
-    maxCellSize: CONTROL_DEFAULTS.maxCellSize,
     subdivisionLoops,
     subdivisionMode,
     subdivisionRate,
@@ -576,6 +553,11 @@ export default function Home() {
     textureOpacity,
     halftoneAmount,
     weightThermal,
+    weightSlitScan: slitScanEnabled ? weightSlitScan : 0,
+    slitScanAmount,
+    slitScanFrequency,
+    slitScanMode,
+    slitScanLuminanceMask,
   }
 
   /**
@@ -611,6 +593,12 @@ export default function Home() {
     setWeightPixelate(next.weightPixelate)
     setHalftoneAmount(next.halftoneAmount)
     setWeightThermal(next.weightThermal)
+    setWeightSlitScan(next.weightSlitScan)
+    setSlitScanEnabled(next.weightSlitScan > 0)
+    setSlitScanAmount(next.slitScanAmount)
+    setSlitScanFrequency(next.slitScanFrequency)
+    setSlitScanMode(next.slitScanMode)
+    setSlitScanLuminanceMask(next.slitScanLuminanceMask)
   }, [])
 
   /** Apply every field of a snapshot, including Phase 3 + debug overlays. */
@@ -625,8 +613,8 @@ export default function Home() {
     [applyPhase12Settings]
   )
 
-  /* eslint-disable react-hooks/purity -- randomization is intentional here; only ever
-     invoked from the Random button's click handler, never during render. */
+  /* Randomization is intentional here: this is only ever invoked from the Random
+     button's click handler, never during render. */
   function buildRandomPhase12Settings(base: EffectSettings): EffectSettings {
     const verticalAmount = randomSignedSmearAmount()
     const horizontalAmount = randomSignedSmearAmount()
@@ -686,6 +674,15 @@ export default function Home() {
         Math.random() < R.weightThermal.zeroChance
           ? 0
           : randInt(R.weightThermal.min, R.weightThermal.max),
+      weightSlitScan:
+        Math.random() < R.weightSlitScan.zeroChance
+          ? 0
+          : randInt(R.weightSlitScan.min, R.weightSlitScan.max),
+      slitScanAmount: randInt(R.slitScanAmount.min, R.slitScanAmount.max),
+      slitScanFrequency: randInt(
+        R.slitScanFrequency.min,
+        R.slitScanFrequency.max
+      ),
       // Phase 3 preserved from base
       textureEnabled: base.textureEnabled,
       textureOpacity: base.textureOpacity,
@@ -693,7 +690,6 @@ export default function Home() {
       showCellLayout: base.showCellLayout,
     }
   }
-  /* eslint-enable react-hooks/purity */
 
   const onPreviewFrame = useCallback(
     (width: number, height: number, bitmap: ImageBitmap) => {
@@ -752,10 +748,7 @@ export default function Home() {
 
         const url = URL.createObjectURL(file)
         setUploadError(null)
-        setImageSrc((prev) => {
-          releaseSourceBlob(prev, { history: visualHistoryRef.current })
-          return url
-        })
+        setImageSrc(url)
         seedRandomHistory(effectSettings)
       } catch {
         setUploadError("Could not read that image. Please try another file.")
@@ -851,48 +844,9 @@ export default function Home() {
         imageSrc: capturedImageSrc,
         effectSettings: capturedSettings,
       }
-      setVisualHistory((prev) =>
-        commitHistory([snapshot, ...prev], previewedId, imageSrcRef.current)
-      )
+      setVisualHistory((prev) => capVisualHistory([snapshot, ...prev], previewedId))
     }, "image/png")
   }
-
-  /**
-   * Free a snapshot's preview blob. Unlike `imageSrc`, each `previewSrc` belongs to exactly
-   * one snapshot, so it only needs guarding against the copy the modal is currently showing.
-   */
-  function revokeSnapshotPreview(
-    snapshot: HistorySnapshot,
-    previewedId?: string
-  ) {
-    if (!snapshot.previewSrc || snapshot.id === previewedId) return
-    URL.revokeObjectURL(snapshot.previewSrc)
-  }
-
-  /**
-   * Apply the History cap and revoke blobs of snapshots that actually left the list.
-   * Pass `pinnedId` while the preview modal is open so Restore still has valid URLs.
-   */
-  const commitHistory = useCallback(
-    (
-      items: HistorySnapshot[],
-      pinnedId: string | undefined,
-      liveImageSrc: string | null | undefined
-    ): HistorySnapshot[] => {
-      const nextHistory = capVisualHistory(items, pinnedId)
-      const keepIds = new Set(nextHistory.map((snap) => snap.id))
-      for (const evicted of items) {
-        if (keepIds.has(evicted.id)) continue
-        releaseSourceBlob(evicted.imageSrc, {
-          liveImageSrc,
-          history: nextHistory,
-        })
-        revokeSnapshotPreview(evicted)
-      }
-      return nextHistory
-    },
-    []
-  )
 
   /** Instantly remove one History thumbnail and free its blobs if nothing else needs them. */
   function handleDeleteHistory(id: string, event: React.MouseEvent) {
@@ -901,20 +855,14 @@ export default function Home() {
     // Dismiss it the same way Cancel does, so the controls rewind instead of being
     // stranded on the deleted snapshot's settings.
     if (previewItem?.id === id) cancelPreview()
+    // Pure updater: the blobs this drops are freed by the release effect below,
+    // which runs once on the list that actually committed.
     setVisualHistory((prev) => {
-      const target = prev.find((snap) => snap.id === id)
       const survivors = prev.filter((snap) => snap.id !== id)
-      if (target) {
-        releaseSourceBlob(target.imageSrc, {
-          liveImageSrc: imageSrcRef.current,
-          history: survivors,
-        })
-        revokeSnapshotPreview(target)
-      }
       // Recap in case the list was holding an extra pinned preview slot.
       const stillPreviewing =
         previewItem?.id === id ? undefined : previewItem?.id
-      return commitHistory(survivors, stillPreviewing, imageSrcRef.current)
+      return capVisualHistory(survivors, stillPreviewing)
     })
   }
 
@@ -935,21 +883,15 @@ export default function Home() {
     applyFullEffectSettings(snapshot.effectSettings)
     setPreviewItem(snapshot)
     // Switching the pin from A to B must evict A if it was only kept as the extra slot.
-    setVisualHistory((prev) =>
-      commitHistory(prev, snapshot.id, imageSrcRef.current)
-    )
+    setVisualHistory((prev) => capVisualHistory(prev, snapshot.id))
   }
 
   /** Restore the previewed snapshot: load its image as the live working state. */
   function handleRestore() {
     if (!previewItem) return
     const { imageSrc: restoredSrc } = previewItem
-    const nextHistory = capVisualHistory(visualHistory)
-    setVisualHistory((prev) => commitHistory(prev, undefined, restoredSrc))
-    setImageSrc((prev) => {
-      releaseSourceBlob(prev, { history: nextHistory })
-      return restoredSrc
-    })
+    setVisualHistory((prev) => capVisualHistory(prev, undefined))
+    setImageSrc(restoredSrc)
     // The snapshot's settings went live back in `openPreview`, so restoring them is just a
     // matter of dropping the backup — re-applying here would only churn the smear object
     // identities `useAppWorkers` watches and cost a redundant worker render.
@@ -993,10 +935,7 @@ export default function Home() {
       const neutral = buildNeutralEffectSettings(effectSettings)
       // Same synchronous block as the swap, so React commits the new source and the
       // zeroed controls in one render — no frame showing the old image un-effected.
-      setImageSrc((prev) => {
-        releaseSourceBlob(prev, { history: visualHistoryRef.current })
-        return url
-      })
+      setImageSrc(url)
       applyFullEffectSettings(neutral)
       // Seed Random's undo stack with what actually went live, or stepping back would
       // restore parameters the canvas never had.
@@ -1016,6 +955,48 @@ export default function Home() {
     imageSrcRef.current = imageSrc
     visualHistoryRef.current = visualHistory
   }, [imageSrc, visualHistory])
+
+  /**
+   * Blob URLs are freed here, never inside the state updaters that drop them.
+   * React treats an updater as pure and is free to replay or discard one; a
+   * discarded replay that had already revoked would leave the state that
+   * actually committed pointing at a dead URL, which shows up as a broken
+   * thumbnail rather than an error. An effect runs once, after commit, over the
+   * values that won.
+   *
+   * Both holders are still checked through `releaseSourceBlob`, since one source
+   * blob can back the live image and any number of snapshots at once.
+   */
+  const releasedImageSrcRef = useRef(imageSrc)
+  const releasedHistoryRef = useRef(visualHistory)
+  useEffect(() => {
+    const previousSrc = releasedImageSrcRef.current
+    const previousHistory = releasedHistoryRef.current
+    releasedImageSrcRef.current = imageSrc
+    releasedHistoryRef.current = visualHistory
+
+    if (previousSrc && previousSrc !== imageSrc) {
+      releaseSourceBlob(previousSrc, {
+        liveImageSrc: imageSrc,
+        history: visualHistory,
+      })
+    }
+
+    if (previousHistory === visualHistory) return
+    const liveIds = new Set(visualHistory.map((snap) => snap.id))
+    for (const gone of previousHistory) {
+      if (liveIds.has(gone.id)) continue
+      releaseSourceBlob(gone.imageSrc, {
+        liveImageSrc: imageSrc,
+        history: visualHistory,
+      })
+      // Each `previewSrc` belongs to exactly one snapshot, so it only needs
+      // guarding against the copy the modal is currently showing.
+      if (gone.previewSrc && gone.id !== previewItem?.id) {
+        URL.revokeObjectURL(gone.previewSrc)
+      }
+    }
+  }, [imageSrc, visualHistory, previewItem])
 
   useEffect(() => {
     return () => {
@@ -1040,10 +1021,8 @@ export default function Home() {
     }
     setBackupSettings(null)
     setPreviewItem(null)
-    setVisualHistory((prev) =>
-      commitHistory(prev, undefined, imageSrcRef.current)
-    )
-  }, [backupSettings, applyFullEffectSettings, commitHistory])
+    setVisualHistory((prev) => capVisualHistory(prev, undefined))
+  }, [backupSettings, applyFullEffectSettings])
 
   /**
    * Escape dismisses the History preview modal, same as the backdrop or Cancel.
@@ -1108,46 +1087,6 @@ export default function Home() {
     processFile(file)
   }
 
-  const floatingCard =
-    "shrink-0 overflow-visible rounded-2xl border border-white/10 bg-slate-900/40 p-6 text-[#f5f5f7] shadow-[0_8px_32px_rgba(0,0,0,0.5)] backdrop-blur-xl"
-  const pageTitle =
-    "font-heading text-sm font-semibold tracking-tight text-[#f5f5f7]"
-  const sectionTitle =
-    "font-heading text-xs font-medium uppercase tracking-[0.12em] text-slate-300"
-  const controlLabel = "font-body text-sm text-slate-300"
-  /**
-   * The small-screen `px-2.5` is a deliberate ceiling, not a guess. These sit in a
-   * `flex-nowrap` / `overflow-x-auto` strip below `lg` and are `shrink-0`, so padding is
-   * never compressed — it just pushes the five buttons into horizontal scrolling. 10px a
-   * side is about the most that keeps them all on screen at ~360px.
-   *
-   * Kept to two steps on purpose: a `sm:` step would leak into the `cn(toolbarActionButton,
-   * "... px-6")` call sites, since tailwind-merge only resolves conflicts within a matching
-   * variant and an unprefixed override cannot cancel a prefixed one.
-   */
-  const toolbarActionButton =
-    "h-7 shrink-0 rounded-2xl border border-white/10 bg-gradient-to-b from-slate-300 via-slate-400 to-slate-500 px-2.5 text-xs font-semibold text-slate-950 shadow-none transition-[background,opacity,transform] hover:from-slate-200 hover:via-slate-300 hover:to-slate-400 lg:h-8 lg:px-6"
-  /**
-   * The box the rendered image occupies. Shared by the live canvas pane and the preview
-   * overlay so the preview lands on exactly the canvas's footprint — they must stay identical.
-   * No viewport-height cap: a mid-size `max-h-[80vh]` made the image collapse between
-   * mobile and desktop breakpoints, then jump back.
-   */
-  const canvasBoxClass =
-    "flex size-full max-w-[1200px] items-center justify-center overflow-hidden"
-  const helperText = "font-body text-xs text-slate-400"
-  const bodyText = "font-body text-sm font-medium text-slate-200"
-  const footerText = "font-footer text-xs text-slate-400"
-  const footerLink =
-    "font-footer text-slate-300 transition-colors hover:text-slate-100"
-  const controlField = "flex flex-col gap-1.5"
-  const sliderRow = "flex w-full min-w-0 items-center gap-1.5"
-  const sliderTrackClass = "w-full min-w-0 flex-1"
-  const sliderValueReadout = cn(
-    footerText,
-    "w-8 shrink-0 text-right tabular-nums"
-  )
-
   return (
     <div className="flex h-dvh flex-col overflow-hidden bg-[radial-gradient(ellipse_at_top_left,_var(--tw-gradient-stops))] from-slate-900 via-[#08080a] to-black font-body text-[#f5f5f7]">
       <div className="flex min-h-0 flex-1 flex-col overflow-hidden lg:flex-row">
@@ -1173,869 +1112,95 @@ export default function Home() {
         />
         <h1 className={cn(pageTitle, "hidden shrink-0 lg:block")}>Pixel By Day</h1>
 
-        <div className={cn(floatingCard, "flex flex-col gap-3 p-4")}>
-          <div className={controlField}>
-            <div className="flex items-center gap-1.5">
-              <label htmlFor="pipeline-passes" className={controlLabel}>
-                Repeat
-              </label>
-            </div>
-            <div className={sliderRow}>
-              <div className={cn(sliderTrackClass, "relative")}>
-                <Slider
-                  id="pipeline-passes"
-                  aria-label="Repeat"
-                  className="relative z-10 w-full min-w-0"
-                  value={[passesDrag ?? passes]}
-                  min={1}
-                  max={3}
-                  step={0.01}
-                  onValueChange={(value) => {
-                    const raw = sliderValue(value, CONTROL_DEFAULTS.passes)
-                    setPassesDrag(raw)
-                    setPasses(
-                      Math.max(1, Math.min(3, Math.round(raw)))
-                    )
-                  }}
-                  onValueCommitted={(value) => {
-                    const raw = sliderValue(value, CONTROL_DEFAULTS.passes)
-                    setPasses(
-                      Math.max(1, Math.min(3, Math.round(raw)))
-                    )
-                    setPassesDrag(null)
-                  }}
-                />
-                {/* Integer stop ticks (1 / 2 / 3) — ends sit at the track tips */}
-                <div
-                  aria-hidden
-                  className="pointer-events-none absolute inset-x-0 top-1/2 z-0 h-0"
-                >
-                  {[0, 50, 100].map((pct) => (
-                    <span
-                      key={pct}
-                      className={cn(
-                        "absolute top-0 h-1.5 w-px -translate-y-1/2 bg-slate-400",
-                        pct === 0
-                          ? "left-0"
-                          : pct === 100
-                            ? "right-0"
-                            : "left-1/2 -translate-x-1/2"
-                      )}
-                    />
-                  ))}
-                </div>
-              </div>
-              <div className="flex shrink-0 items-center gap-0.5">
-                <span className={sliderValueReadout} aria-hidden="true">
-                  {passes}
-                </span>
-                <ResetAmountButton
-                  label="Repeat"
-                  defaultValue={CONTROL_DEFAULTS.passes}
-                  onReset={() => {
-                    setPasses(CONTROL_DEFAULTS.passes)
-                    setPassesDrag(null)
-                  }}
-                />
-              </div>
-            </div>
-          </div>
-          <div className={controlField}>
-            <div className="flex items-center gap-1.5">
-              <label htmlFor="pipeline-rate" className={controlLabel}>
-                Repeat Strength
-              </label>
-            </div>
-            <div className={sliderRow}>
-              <Slider
-                id="pipeline-rate"
-                aria-label="Repeat Strength"
-                className={sliderTrackClass}
-                value={[rate]}
-                min={0}
-                max={100}
-                step={1}
-                onValueChange={(value) =>
-                  setRate(sliderValue(value, CONTROL_DEFAULTS.rate))
-                }
-              />
-              <div className="flex shrink-0 items-center gap-0.5">
-                <span className={sliderValueReadout} aria-hidden="true">
-                  {rate}
-                </span>
-                <ResetAmountButton
-                  label="Repeat Strength"
-                  defaultValue={CONTROL_DEFAULTS.rate}
-                  onReset={() => setRate(CONTROL_DEFAULTS.rate)}
-                />
-              </div>
-            </div>
-          </div>
-        </div>
+        <RepeatSection
+          passes={passes}
+          passesDrag={passesDrag}
+          rate={rate}
+          setPasses={setPasses}
+          setPassesDrag={setPassesDrag}
+          setRate={setRate}
+        />
 
-        <CollapsibleCallout
-          title="Cell Pattern"
-          className={floatingCard}
-          titleClassName={sectionTitle}
-          enabled={showCellLayout}
-          enabledLabel="Visualizing"
-        >
-          <div className="flex items-center justify-between gap-4">
-            <div className="flex items-center gap-1.5">
-              <label htmlFor="show-cell-layout" className={controlLabel}>
-                Show Cell Layout
-              </label>
-            </div>
-            <Switch
-              id="show-cell-layout"
-              checked={showCellLayout}
-              onCheckedChange={handleShowCellLayoutChange}
-            />
-          </div>
+        <LayoutSection
+          showCellLayout={showCellLayout}
+          handleShowCellLayoutChange={handleShowCellLayoutChange}
+          subdivisionLoops={subdivisionLoops}
+          setSubdivisionLoops={setSubdivisionLoops}
+          subdivisionMode={subdivisionMode}
+          setSubdivisionMode={setSubdivisionMode}
+          subdivisionRate={subdivisionRate}
+          setSubdivisionRate={setSubdivisionRate}
+        />
 
-          <div className="flex items-center justify-between gap-4">
-            <span className={controlLabel}>Mode</span>
-            <div
-              role="group"
-              aria-label="Mode"
-              className="inline-flex rounded-lg border border-white/10 bg-slate-950/40 p-0.5"
-            >
-              {(
-                [
-                  { id: "frontier", label: "Frontier" },
-                  { id: "global", label: "Global" },
-                ] as const
-              ).map((option) => {
-                const active = subdivisionMode === option.id
-                return (
-                  <button
-                    key={option.id}
-                    type="button"
-                    aria-pressed={active}
-                    onClick={() => setSubdivisionMode(option.id)}
-                    className={cn(
-                      "rounded-md px-2.5 py-1 text-xs font-medium transition-colors",
-                      active
-                        ? "bg-slate-200 text-slate-950"
-                        : "text-slate-300 hover:text-slate-100"
-                    )}
-                  >
-                    {option.label}
-                  </button>
-                )
-              })}
-            </div>
-          </div>
+        <NoiseMaskSection
+          showNoiseMap={showNoiseMap}
+          handleShowNoiseMapChange={handleShowNoiseMapChange}
+          noiseScale={noiseScale}
+          setNoiseScale={setNoiseScale}
+          noiseSpread={noiseSpread}
+          setNoiseSpread={setNoiseSpread}
+        />
 
-          <div className={controlField}>
-            <div className="flex items-center gap-1.5">
-              <label htmlFor="subdivision-loops" className={controlLabel}>
-                Split Passes
-              </label>
-            </div>
-            <div className={sliderRow}>
-              <Slider
-                id="subdivision-loops"
-                aria-label="Split Passes"
-                className={sliderTrackClass}
-                value={[subdivisionLoops]}
-                min={1}
-                max={7}
-                step={1}
-                onValueChange={(value) =>
-                  setSubdivisionLoops(
-                    sliderValue(value, CONTROL_DEFAULTS.subdivisionLoops)
-                  )
-                }
-              />
-              <div className="flex shrink-0 items-center gap-0.5">
-                <span className={sliderValueReadout} aria-hidden="true">
-                  {subdivisionLoops}
-                </span>
-                <ResetAmountButton
-                  label="Split Passes"
-                  defaultValue={CONTROL_DEFAULTS.subdivisionLoops}
-                  onReset={() =>
-                    setSubdivisionLoops(CONTROL_DEFAULTS.subdivisionLoops)
-                  }
-                />
-              </div>
-            </div>
-          </div>
+        <BaseEffectsSection
+          randomSample={randomSample}
+          setRandomSample={setRandomSample}
+          weightDither={weightDither}
+          setWeightDither={setWeightDither}
+          weightInvert={weightInvert}
+          setWeightInvert={setWeightInvert}
+          weightSurreal={weightSurreal}
+          setWeightSurreal={setWeightSurreal}
+          weightPixelate={weightPixelate}
+          setWeightPixelate={setWeightPixelate}
+          halftoneAmount={halftoneAmount}
+          setHalftoneAmount={setHalftoneAmount}
+          weightThermal={weightThermal}
+          setWeightThermal={setWeightThermal}
+          weightOriginal={weightOriginal}
+          setWeightOriginal={setWeightOriginal}
+          slitScanEnabled={slitScanEnabled}
+          setSlitScanEnabled={setSlitScanEnabled}
+          slitScanMode={slitScanMode}
+          setSlitScanMode={setSlitScanMode}
+          slitScanLuminanceMask={slitScanLuminanceMask}
+          setSlitScanLuminanceMask={setSlitScanLuminanceMask}
+          weightSlitScan={weightSlitScan}
+          setWeightSlitScan={setWeightSlitScan}
+          slitScanAmount={slitScanAmount}
+          setSlitScanAmount={setSlitScanAmount}
+          slitScanFrequency={slitScanFrequency}
+          setSlitScanFrequency={setSlitScanFrequency}
+        />
 
-          <div className={controlField}>
-            <div className="flex items-center gap-1.5">
-              <label htmlFor="subdivision-rate" className={controlLabel}>
-                Split Rate
-              </label>
-            </div>
-            <div className={sliderRow}>
-              <Slider
-                id="subdivision-rate"
-                aria-label="Split Rate"
-                className={sliderTrackClass}
-                value={[subdivisionRate]}
-                min={10}
-                max={100}
-                step={1}
-                onValueChange={(value) =>
-                  setSubdivisionRate(
-                    sliderValue(value, CONTROL_DEFAULTS.subdivisionRate)
-                  )
-                }
-              />
-              <div className="flex shrink-0 items-center gap-0.5">
-                <span className={sliderValueReadout} aria-hidden="true">
-                  {subdivisionRate}
-                </span>
-                <ResetAmountButton
-                  label="Split Rate"
-                  defaultValue={CONTROL_DEFAULTS.subdivisionRate}
-                  onReset={() =>
-                    setSubdivisionRate(CONTROL_DEFAULTS.subdivisionRate)
-                  }
-                />
-              </div>
-            </div>
-          </div>
-        </CollapsibleCallout>
+        <SmearsSection
+          smearVertical={smearVertical}
+          setSmearVertical={setSmearVertical}
+          smearHorizontal={smearHorizontal}
+          setSmearHorizontal={setSmearHorizontal}
+          smearDiagonal1={smearDiagonal1}
+          setSmearDiagonal1={setSmearDiagonal1}
+          smearDiagonal2={smearDiagonal2}
+          setSmearDiagonal2={setSmearDiagonal2}
+          smearRecursive={smearRecursive}
+          setSmearRecursive={setSmearRecursive}
+          verticalWeight={verticalWeight}
+          setVerticalWeight={setVerticalWeight}
+          horizontalWeight={horizontalWeight}
+          setHorizontalWeight={setHorizontalWeight}
+          diagonal1Weight={diagonal1Weight}
+          setDiagonal1Weight={setDiagonal1Weight}
+          diagonal2Weight={diagonal2Weight}
+          setDiagonal2Weight={setDiagonal2Weight}
+          recursiveWeight={recursiveWeight}
+          setRecursiveWeight={setRecursiveWeight}
+        />
 
-        <CollapsibleCallout
-          title="Noise Mask"
-          className={floatingCard}
-          titleClassName={sectionTitle}
-          enabled={showNoiseMap}
-          enabledLabel="Visualizing"
-        >
-          <div className="flex items-center justify-between gap-4">
-            <div className="flex items-center gap-1.5">
-              <label htmlFor="show-noise-map" className={controlLabel}>
-                Visualize Noise
-              </label>
-            </div>
-            <Switch
-              id="show-noise-map"
-              checked={showNoiseMap}
-              onCheckedChange={handleShowNoiseMapChange}
-            />
-          </div>
-
-          <div className={controlField}>
-            <div className="flex items-center gap-1.5">
-              <label htmlFor="noise-scale" className={controlLabel}>
-                Noise Scale
-              </label>
-            </div>
-            <div className={sliderRow}>
-              <Slider
-                id="noise-scale"
-                aria-label="Noise Scale"
-                className={sliderTrackClass}
-                value={[noiseScale]}
-                min={1}
-                max={100}
-                step={1}
-                onValueChange={(value) =>
-                  setNoiseScale(sliderValue(value, CONTROL_DEFAULTS.noiseScale))
-                }
-              />
-              <div className="flex shrink-0 items-center gap-0.5">
-                <span className={sliderValueReadout} aria-hidden="true">
-                  {noiseScale}
-                </span>
-                <ResetAmountButton
-                  label="Noise Scale"
-                  defaultValue={CONTROL_DEFAULTS.noiseScale}
-                  onReset={() => setNoiseScale(CONTROL_DEFAULTS.noiseScale)}
-                />
-              </div>
-            </div>
-          </div>
-
-          <div className={controlField}>
-            <div className="flex items-center gap-1.5">
-              <label htmlFor="noise-spread" className={controlLabel}>
-                Noise Spread
-              </label>
-            </div>
-            <div className={sliderRow}>
-              <Slider
-                id="noise-spread"
-                aria-label="Noise Spread"
-                className={sliderTrackClass}
-                value={[noiseSpread]}
-                min={0}
-                max={100}
-                step={1}
-                onValueChange={(value) =>
-                  setNoiseSpread(
-                    sliderValue(value, CONTROL_DEFAULTS.noiseSpread)
-                  )
-                }
-              />
-              <div className="flex shrink-0 items-center gap-0.5">
-                <span className={sliderValueReadout} aria-hidden="true">
-                  {noiseSpread}
-                </span>
-                <ResetAmountButton
-                  label="Noise Spread"
-                  defaultValue={CONTROL_DEFAULTS.noiseSpread}
-                  onReset={() => setNoiseSpread(CONTROL_DEFAULTS.noiseSpread)}
-                />
-              </div>
-            </div>
-          </div>
-        </CollapsibleCallout>
-
-        <CollapsibleCallout
-          title="Effects"
-          className={floatingCard}
-          titleClassName={sectionTitle}
-          enabled={
-            randomSample ||
-            weightPixelate > 0 ||
-            weightInvert > 0 ||
-            weightSurreal > 0 ||
-            weightDither > 0 ||
-            weightOriginal > 0 ||
-            halftoneAmount > 0 ||
-            weightThermal > 0
-          }
-        >
-            <div className="flex items-center justify-between gap-4">
-              <div className="flex items-center gap-1.5">
-                <label htmlFor="random-sample" className={controlLabel}>
-                  Random Sample
-                </label>
-              </div>
-              <Switch
-                id="random-sample"
-                checked={randomSample}
-                onCheckedChange={setRandomSample}
-              />
-            </div>
-
-            <div className={controlField}>
-              <div className="flex items-center gap-1.5">
-                <label htmlFor="weight-pixelate" className={controlLabel}>
-                  Pixelate
-                </label>
-              </div>
-              <div className={sliderRow}>
-                <Slider
-                  id="weight-pixelate"
-                  aria-label="Pixelate"
-                  className={sliderTrackClass}
-                  value={[weightPixelate]}
-                  min={0}
-                  max={100}
-                  step={1}
-                  onValueChange={(value) =>
-                    setWeightPixelate(
-                      sliderValue(value, CONTROL_DEFAULTS.weightPixelate)
-                    )
-                  }
-                />
-                <div className="flex shrink-0 items-center gap-0.5">
-                  <span className={sliderValueReadout} aria-hidden="true">
-                    {weightPixelate}
-                  </span>
-                  <ResetAmountButton
-                    label="Pixelate"
-                    defaultValue={CONTROL_DEFAULTS.weightPixelate}
-                    onReset={() =>
-                      setWeightPixelate(CONTROL_DEFAULTS.weightPixelate)
-                    }
-                  />
-                </div>
-              </div>
-            </div>
-
-            <div className={controlField}>
-              <div className="flex items-center gap-1.5">
-                <label htmlFor="weight-invert" className={controlLabel}>
-                  Invert
-                </label>
-              </div>
-              <div className={sliderRow}>
-                <Slider
-                  id="weight-invert"
-                  aria-label="Invert"
-                  className={sliderTrackClass}
-                  value={[weightInvert]}
-                  min={0}
-                  max={100}
-                  step={1}
-                  onValueChange={(value) =>
-                    setWeightInvert(
-                      sliderValue(value, CONTROL_DEFAULTS.weightInvert)
-                    )
-                  }
-                />
-                <div className="flex shrink-0 items-center gap-0.5">
-                  <span className={sliderValueReadout} aria-hidden="true">
-                    {weightInvert}
-                  </span>
-                  <ResetAmountButton
-                    label="Invert"
-                    defaultValue={CONTROL_DEFAULTS.weightInvert}
-                    onReset={() =>
-                      setWeightInvert(CONTROL_DEFAULTS.weightInvert)
-                    }
-                  />
-                </div>
-              </div>
-            </div>
-
-            <div className={controlField}>
-              <div className="flex items-center gap-1.5">
-                <label htmlFor="weight-surreal" className={controlLabel}>
-                  Surreal
-                </label>
-              </div>
-              <div className={sliderRow}>
-                <Slider
-                  id="weight-surreal"
-                  aria-label="Surreal"
-                  className={sliderTrackClass}
-                  value={[weightSurreal]}
-                  min={0}
-                  max={100}
-                  step={1}
-                  onValueChange={(value) =>
-                    setWeightSurreal(
-                      sliderValue(value, CONTROL_DEFAULTS.weightSurreal)
-                    )
-                  }
-                />
-                <div className="flex shrink-0 items-center gap-0.5">
-                  <span className={sliderValueReadout} aria-hidden="true">
-                    {weightSurreal}
-                  </span>
-                  <ResetAmountButton
-                    label="Surreal"
-                    defaultValue={CONTROL_DEFAULTS.weightSurreal}
-                    onReset={() =>
-                      setWeightSurreal(CONTROL_DEFAULTS.weightSurreal)
-                    }
-                  />
-                </div>
-              </div>
-            </div>
-
-            <div className={controlField}>
-              <div className="flex items-center gap-1.5">
-                <label htmlFor="weight-dither" className={controlLabel}>
-                  Dither
-                </label>
-              </div>
-              <div className={sliderRow}>
-                <Slider
-                  id="weight-dither"
-                  aria-label="Dither"
-                  className={sliderTrackClass}
-                  value={[weightDither]}
-                  min={0}
-                  max={100}
-                  step={1}
-                  onValueChange={(value) =>
-                    setWeightDither(
-                      sliderValue(value, CONTROL_DEFAULTS.weightDither)
-                    )
-                  }
-                />
-                <div className="flex shrink-0 items-center gap-0.5">
-                  <span className={sliderValueReadout} aria-hidden="true">
-                    {weightDither}
-                  </span>
-                  <ResetAmountButton
-                    label="Dither"
-                    defaultValue={CONTROL_DEFAULTS.weightDither}
-                    onReset={() =>
-                      setWeightDither(CONTROL_DEFAULTS.weightDither)
-                    }
-                  />
-                </div>
-              </div>
-            </div>
-
-            <div className={controlField}>
-              <div className="flex items-center gap-1.5">
-                <label htmlFor="halftone-amount" className={controlLabel}>
-                  Halftone
-                </label>
-              </div>
-              <div className={sliderRow}>
-                <Slider
-                  id="halftone-amount"
-                  aria-label="Halftone"
-                  className={sliderTrackClass}
-                  value={[halftoneAmount]}
-                  min={0}
-                  max={100}
-                  step={1}
-                  onValueChange={(value) =>
-                    setHalftoneAmount(
-                      sliderValue(value, CONTROL_DEFAULTS.halftoneAmount)
-                    )
-                  }
-                />
-                <div className="flex shrink-0 items-center gap-0.5">
-                  <span className={sliderValueReadout} aria-hidden="true">
-                    {halftoneAmount}
-                  </span>
-                  <ResetAmountButton
-                    label="Halftone"
-                    defaultValue={CONTROL_DEFAULTS.halftoneAmount}
-                    onReset={() =>
-                      setHalftoneAmount(CONTROL_DEFAULTS.halftoneAmount)
-                    }
-                  />
-                </div>
-              </div>
-            </div>
-
-            <div className={controlField}>
-              <div className="flex items-center gap-1.5">
-                <label htmlFor="weight-thermal" className={controlLabel}>
-                  Thermal
-                </label>
-              </div>
-              <div className={sliderRow}>
-                <Slider
-                  id="weight-thermal"
-                  aria-label="Thermal"
-                  className={sliderTrackClass}
-                  value={[weightThermal]}
-                  min={0}
-                  max={100}
-                  step={1}
-                  onValueChange={(value) =>
-                    setWeightThermal(
-                      sliderValue(value, CONTROL_DEFAULTS.weightThermal)
-                    )
-                  }
-                />
-                <div className="flex shrink-0 items-center gap-0.5">
-                  <span className={sliderValueReadout} aria-hidden="true">
-                    {weightThermal}
-                  </span>
-                  <ResetAmountButton
-                    label="Thermal"
-                    defaultValue={CONTROL_DEFAULTS.weightThermal}
-                    onReset={() =>
-                      setWeightThermal(CONTROL_DEFAULTS.weightThermal)
-                    }
-                  />
-                </div>
-              </div>
-            </div>
-
-            <div className={controlField}>
-              <div className="flex items-center gap-1.5">
-                <label htmlFor="weight-original" className={controlLabel}>
-                  Original
-                </label>
-              </div>
-              <div className={sliderRow}>
-                <Slider
-                  id="weight-original"
-                  aria-label="Original"
-                  className={sliderTrackClass}
-                  value={[weightOriginal]}
-                  min={0}
-                  max={100}
-                  step={1}
-                  onValueChange={(value) =>
-                    setWeightOriginal(
-                      sliderValue(value, CONTROL_DEFAULTS.weightOriginal)
-                    )
-                  }
-                />
-                <div className="flex shrink-0 items-center gap-0.5">
-                  <span className={sliderValueReadout} aria-hidden="true">
-                    {weightOriginal}
-                  </span>
-                  <ResetAmountButton
-                    label="Original"
-                    defaultValue={CONTROL_DEFAULTS.weightOriginal}
-                    onReset={() =>
-                      setWeightOriginal(CONTROL_DEFAULTS.weightOriginal)
-                    }
-                  />
-                </div>
-              </div>
-            </div>
-        </CollapsibleCallout>
-
-        <CollapsibleCallout
-          title="Smear"
-          className={floatingCard}
-          titleClassName={sectionTitle}
-          enabled={
-            smearVertical.enabled ||
-            smearHorizontal.enabled ||
-            smearDiagonal1.enabled ||
-            smearDiagonal2.enabled ||
-            smearRecursive.enabled
-          }
-        >
-          {(
-            [
-              {
-                id: "vertical",
-                label: "Vertical",
-                value: smearVertical,
-                set: setSmearVertical,
-                defaultAmount: SMEAR_AMOUNT_DEFAULTS.vertical,
-                minAmount: -100,
-                maxAmount: 100,
-                weight: verticalWeight,
-                setWeight: setVerticalWeight,
-                defaultWeight: SMEAR_WEIGHT_DEFAULTS.vertical,
-              },
-              {
-                id: "horizontal",
-                label: "Horizontal",
-                value: smearHorizontal,
-                set: setSmearHorizontal,
-                defaultAmount: SMEAR_AMOUNT_DEFAULTS.horizontal,
-                minAmount: -100,
-                maxAmount: 100,
-                weight: horizontalWeight,
-                setWeight: setHorizontalWeight,
-                defaultWeight: SMEAR_WEIGHT_DEFAULTS.horizontal,
-              },
-              {
-                id: "diagonal2",
-                label: "Diagonal Up",
-                value: smearDiagonal2,
-                set: setSmearDiagonal2,
-                defaultAmount: SMEAR_AMOUNT_DEFAULTS.diagonal2,
-                minAmount: -100,
-                maxAmount: 100,
-                weight: diagonal2Weight,
-                setWeight: setDiagonal2Weight,
-                defaultWeight: SMEAR_WEIGHT_DEFAULTS.diagonal2,
-              },
-              {
-                id: "diagonal1",
-                label: "Diagonal Down",
-                value: smearDiagonal1,
-                set: setSmearDiagonal1,
-                defaultAmount: SMEAR_AMOUNT_DEFAULTS.diagonal1,
-                minAmount: -100,
-                maxAmount: 100,
-                weight: diagonal1Weight,
-                setWeight: setDiagonal1Weight,
-                defaultWeight: SMEAR_WEIGHT_DEFAULTS.diagonal1,
-              },
-              {
-                id: "recursive",
-                label: "Recursive",
-                value: smearRecursive,
-                set: setSmearRecursive,
-                defaultAmount: SMEAR_AMOUNT_DEFAULTS.recursive,
-                minAmount: 0,
-                maxAmount: 100,
-                weight: recursiveWeight,
-                setWeight: setRecursiveWeight,
-                defaultWeight: SMEAR_WEIGHT_DEFAULTS.recursive,
-              },
-            ] as const
-          ).map((style) => (
-            <div
-              key={style.id}
-              className="border-b border-white/5 pb-4 last:border-b-0 last:pb-0"
-            >
-              <div className="flex items-center justify-between gap-4">
-                <div className="flex items-center gap-1.5">
-                  <label htmlFor={`smear-${style.id}`} className={controlLabel}>
-                    {style.label}
-                  </label>
-                </div>
-                <Switch
-                  id={`smear-${style.id}`}
-                  checked={style.value.enabled}
-                  onCheckedChange={(checked) =>
-                    style.set({ ...style.value, enabled: checked })
-                  }
-                />
-              </div>
-              <div
-                className={cn(
-                  "grid transition-[grid-template-rows] duration-200 ease-out",
-                  style.value.enabled ? "grid-rows-[1fr]" : "grid-rows-[0fr]"
-                )}
-              >
-                <div
-                  className="min-h-0 overflow-hidden"
-                  aria-hidden={!style.value.enabled}
-                  inert={!style.value.enabled ? true : undefined}
-                >
-                  <div className="flex flex-col gap-3 pt-3">
-                    <div className={controlField}>
-                      <span className={helperText}>Amount</span>
-                      <div className={sliderRow}>
-                        <div
-                          className={cn(
-                            sliderTrackClass,
-                            "relative",
-                            style.minAmount < 0 && "pb-3"
-                          )}
-                        >
-                          <Slider
-                            id={`smear-${style.id}-amount`}
-                            aria-label={`${style.label} amount`}
-                            className="relative z-10 w-full min-w-0"
-                            value={[style.value.amount]}
-                            min={style.minAmount}
-                            max={style.maxAmount}
-                            step={1}
-                            onValueChange={(value) =>
-                              style.set({
-                                ...style.value,
-                                amount: sliderValue(
-                                  value,
-                                  style.defaultAmount
-                                ),
-                              })
-                            }
-                          />
-                          {style.minAmount < 0 ? (
-                            <div
-                              aria-hidden
-                              className="pointer-events-none absolute inset-x-0 top-[7px] z-0 h-0"
-                            >
-                              <span className="absolute left-1/2 top-0 h-2 w-px -translate-x-1/2 -translate-y-1/2 bg-slate-400" />
-                              <span className="absolute left-1/2 top-[8px] -translate-x-1/2 font-footer text-[10px] leading-none tabular-nums text-slate-400">
-                                0
-                              </span>
-                            </div>
-                          ) : null}
-                        </div>
-                        <div className="flex shrink-0 items-center gap-0.5">
-                          <span
-                            className={sliderValueReadout}
-                            aria-hidden="true"
-                          >
-                            {style.value.amount}
-                          </span>
-                          <ResetAmountButton
-                            label={`${style.label} amount`}
-                            defaultValue={style.defaultAmount}
-                            onReset={() =>
-                              style.set({
-                                ...style.value,
-                                amount: style.defaultAmount,
-                              })
-                            }
-                          />
-                        </div>
-                      </div>
-                    </div>
-                    <div className={controlField}>
-                      <span className={helperText}>
-                        {style.id === "recursive" ? "Coverage" : "Weight"}
-                      </span>
-                      <div className={sliderRow}>
-                        <Slider
-                          id={`smear-${style.id}-weight`}
-                          aria-label={`${style.label} ${style.id === "recursive" ? "coverage" : "weight"}`}
-                          className={sliderTrackClass}
-                          value={[style.weight]}
-                          min={0}
-                          max={100}
-                          step={1}
-                          onValueChange={(value) =>
-                            style.setWeight(
-                              sliderValue(value, style.defaultWeight)
-                            )
-                          }
-                        />
-                        <div className="flex shrink-0 items-center gap-0.5">
-                          <span
-                            className={sliderValueReadout}
-                            aria-hidden="true"
-                          >
-                            {style.weight}
-                          </span>
-                          <ResetAmountButton
-                            label={`${style.label} ${style.id === "recursive" ? "coverage" : "weight"}`}
-                            defaultValue={style.defaultWeight}
-                            onReset={() =>
-                              style.setWeight(style.defaultWeight)
-                            }
-                          />
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </div>
-          ))}
-        </CollapsibleCallout>
-
-        <CollapsibleCallout
-          title="Post-Process"
-          className={floatingCard}
-          titleClassName={sectionTitle}
-          enabled={textureEnabled}
-        >
-          <div className="flex items-center justify-between gap-4">
-            <div className="flex items-center gap-1.5">
-              <label htmlFor="texture-enabled" className={controlLabel}>
-                Apply 35mm Grain
-              </label>
-            </div>
-            <Switch
-              id="texture-enabled"
-              checked={textureEnabled}
-              onCheckedChange={setTextureEnabled}
-            />
-          </div>
-
-          {textureEnabled && (
-            <div className={controlField}>
-              <div className="flex items-center gap-1.5">
-                <label htmlFor="texture-opacity" className={controlLabel}>
-                  Grain Opacity
-                </label>
-              </div>
-              <div className={sliderRow}>
-                <Slider
-                  id="texture-opacity"
-                  aria-label="Grain Opacity"
-                  className={sliderTrackClass}
-                  value={[textureOpacity]}
-                  min={0}
-                  max={1}
-                  step={0.01}
-                  onValueChange={(value) =>
-                    setTextureOpacity(
-                      sliderValue(value, CONTROL_DEFAULTS.textureOpacity)
-                    )
-                  }
-                />
-                <div className="flex shrink-0 items-center gap-0.5">
-                  <span className={sliderValueReadout} aria-hidden="true">
-                    {Math.round(textureOpacity * 100)}
-                  </span>
-                  <ResetAmountButton
-                    label="Grain Opacity"
-                    defaultValue={Math.round(
-                      CONTROL_DEFAULTS.textureOpacity * 100
-                    )}
-                    onReset={() =>
-                      setTextureOpacity(CONTROL_DEFAULTS.textureOpacity)
-                    }
-                  />
-                </div>
-              </div>
-            </div>
-          )}
-        </CollapsibleCallout>
+        <PostProcessingSection
+          textureEnabled={textureEnabled}
+          setTextureEnabled={setTextureEnabled}
+          textureOpacity={textureOpacity}
+          setTextureOpacity={setTextureOpacity}
+        />
         <p className={cn("px-1 pb-2 text-center text-slate-600 lg:hidden", footerText)}>
           Designed and created by{" "}
           <a
@@ -2064,312 +1229,50 @@ export default function Home() {
             "flex h-full min-h-0 flex-col gap-0 overflow-hidden p-0"
           )}
         >
-          <div className="relative flex min-h-0 w-full flex-1 touch-manipulation items-center justify-center overflow-hidden p-2 text-slate-400 sm:p-4 md:p-6">
-            {imageSrc ? (
-              <div className={cn(canvasBoxClass, "touch-manipulation")}>
-                {/* Fills the reserved box at every viewport size, so the first frame
-                    (and every later one) swaps the drawing buffer without resizing
-                    the element. `object-scale-down` letterboxes any aspect ratio and
-                    never upscales past 1:1. */}
-                <canvas
-                  ref={liveCanvasRef}
-                  role="img"
-                  aria-label="Generated mosaic preview"
-                  className="block size-full object-scale-down touch-manipulation"
-                />
-              </div>
-            ) : (
-              <button
-                type="button"
-                onClick={() => fileInputRef.current?.click()}
-                onDragOver={handleDragOver}
-                onDragEnter={handleDragEnter}
-                onDragLeave={handleDragLeave}
-                onDrop={handleDrop}
-                className="absolute inset-0 z-0 flex touch-auto flex-col items-center justify-center gap-1.5 px-6 text-center"
-              >
-                <span className="pointer-events-none flex size-9 items-center justify-center rounded-lg border border-white/10 bg-transparent text-sm font-medium leading-none text-slate-300 sm:size-[4.5rem] sm:rounded-xl sm:text-2xl">
-                  +
-                </span>
-                <span className={cn("pointer-events-none", bodyText)}>
-                  {isDragging ? "Drop image here" : "Drag and drop an image"}
-                </span>
-                {!isDragging && (
-                  <span className={cn("pointer-events-none", helperText)}>
-                    or click to upload
-                  </span>
-                )}
-              </button>
-            )}
-            {uploadError && (
-              <p
-                role="alert"
-                className="absolute inset-x-3 bottom-3 z-20 rounded-lg border border-red-500/40 bg-red-950/90 px-3 py-2 text-center text-xs leading-relaxed text-red-100 shadow-lg sm:inset-x-4 sm:bottom-4"
-              >
-                {uploadError}
-              </p>
-            )}
-            {previewItem && (
-              /* `inset-0` spans this pane's padding box, so repeating its padding here is
-                 what makes the preview land on exactly the canvas's box — not double-inset.
-                 Restore/Cancel live down in the toolbar, leaving the image full size here. */
-              <div
-                className="absolute inset-0 z-40 flex items-center justify-center bg-[#08080a] p-2 sm:p-4 md:p-6"
-                onClick={cancelPreview}
-              >
-                <div className={canvasBoxClass}>
-                  {/* eslint-disable-next-line @next/next/no-img-element -- local blob URL of the captured canvas, not an optimizable remote asset */}
-                  <img
-                    src={previewItem.previewSrc ?? previewItem.thumbnail}
-                    alt="Previewed saved result"
-                    className="max-h-full max-w-full object-contain"
-                    onClick={(event) => event.stopPropagation()}
-                  />
-                </div>
-              </div>
-            )}
-          </div>
-          <div className="relative flex shrink-0 flex-col items-center gap-2 border-t border-white/10 px-3 py-2 md:gap-3 md:px-6 md:py-4">
-            {/* Restore/Cancel sit on top of the hidden controls, so the toolbar keeps its
-                exact height and the canvas above it never resizes. */}
-            {previewing && (
-              <div className="absolute inset-0 z-10 flex items-center justify-center gap-4">
-                <Button
-                  type="button"
-                  size="sm"
-                  className={cn(toolbarActionButton, "h-8 rounded-full px-6")}
-                  onClick={handleRestore}
-                >
-                  Restore
-                </Button>
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="secondary"
-                  className="h-8 rounded-full border border-zinc-700/50 bg-zinc-900 px-6 text-xs text-white hover:bg-zinc-800"
-                  onClick={cancelPreview}
-                >
-                  Cancel
-                </Button>
-              </div>
-            )}
-            <div
-              className={cn(
-                "flex min-w-0 flex-wrap items-center justify-center gap-1.5 md:gap-3",
-                previewing && "invisible"
-              )}
-            >
-              <div className="flex min-w-0 max-w-[12rem] items-center gap-1.5 md:max-w-[12rem]">
-                <label
-                  htmlFor="canvas-seed"
-                  className="shrink-0 text-sm text-slate-300"
-                >
-                  Seed
-                </label>
-                <div className="flex h-8 min-w-0 flex-1 items-center rounded-lg border border-white/10 bg-transparent">
-                  <button
-                    type="button"
-                    aria-label="Decrease seed"
-                    onClick={() => setSeed((prev) => Math.max(0, prev - 1))}
-                    className="inline-flex h-full shrink-0 items-center justify-center px-2 text-slate-300 transition-colors hover:text-slate-100 md:px-2"
-                  >
-                    <ChevronLeft
-                      className="size-4 md:size-4"
-                      strokeWidth={2}
-                    />
-                  </button>
-                  <input
-                    id="canvas-seed"
-                    type="text"
-                    inputMode="numeric"
-                    value={seed}
-                    onChange={(event) => {
-                      const digits = event.target.value.replace(/\D/g, "")
-                      if (digits === "") {
-                        setSeed(0)
-                        return
-                      }
-                      const next = Number.parseInt(digits, 10)
-                      if (Number.isFinite(next)) {
-                        setSeed(Math.max(0, Math.min(99999, next)))
-                      }
-                    }}
-                    className="pointer-events-none min-w-0 w-12 flex-1 select-none bg-transparent py-2 text-center text-sm font-medium tabular-nums text-slate-200 outline-none md:pointer-events-auto md:select-auto"
-                  />
-                  <button
-                    type="button"
-                    aria-label="Increase seed"
-                    onClick={() => setSeed((prev) => Math.min(99999, prev + 1))}
-                    className="inline-flex h-full shrink-0 items-center justify-center px-2 text-slate-300 transition-colors hover:text-slate-100 md:px-2"
-                  >
-                    <ChevronRight
-                      className="size-4 md:size-4"
-                      strokeWidth={2}
-                    />
-                  </button>
-                </div>
-              </div>
-
-              <div className="flex h-8 min-w-0 items-center rounded-lg border border-white/10 bg-transparent">
-                <button
-                  type="button"
-                  aria-label="Previous Random"
-                  title="Previous Random"
-                  disabled={!imageSrc || historyIndex <= 0}
-                  onClick={handleAutoFillBack}
-                  className="inline-flex h-full shrink-0 items-center justify-center px-2 text-slate-300 transition-colors hover:text-slate-100 disabled:pointer-events-none disabled:opacity-35 md:px-2"
-                >
-                  <ChevronLeft
-                    className="size-4 md:size-4"
-                    strokeWidth={2}
-                  />
-                </button>
-                <button
-                  type="button"
-                  aria-label="Generate Random"
-                  title="Randomize layout and effects (keeps grain settings)"
-                  disabled={!imageSrc}
-                  onClick={handleAutoFill}
-                  className="min-w-0 px-2.5 py-2 text-center text-sm font-medium text-slate-300 transition-colors hover:text-slate-100 disabled:pointer-events-none disabled:opacity-35"
-                >
-                  Random
-                </button>
-                <button
-                  type="button"
-                  aria-label="Next Random"
-                  title="Next Random"
-                  disabled={
-                    !imageSrc || historyIndex >= autoFillHistory.length - 1
-                  }
-                  onClick={handleAutoFillForward}
-                  className="inline-flex h-full shrink-0 items-center justify-center px-2 text-slate-300 transition-colors hover:text-slate-100 disabled:pointer-events-none disabled:opacity-35 md:px-2"
-                >
-                  <ChevronRight
-                    className="size-4 md:size-4"
-                    strokeWidth={2}
-                  />
-                </button>
-              </div>
-            </div>
-
-            <div
-              className={cn(
-                "hide-scrollbar flex w-full max-w-full flex-row flex-nowrap items-center justify-center-safe gap-1 overflow-x-auto transition-opacity duration-300 lg:max-w-none lg:gap-3 lg:overflow-visible lg:flex-wrap lg:justify-center",
-                previewing && "invisible"
-              )}
-            >
-                <Button
-                  type="button"
-                  size="sm"
-                  className={toolbarActionButton}
-                  onClick={() => {
-                    if (fileInputRef.current) {
-                      fileInputRef.current.value = ""
-                      fileInputRef.current.click()
-                    }
-                  }}
-                >
-                  Load
-                </Button>
-                <Button
-                  type="button"
-                  size="sm"
-                  className={toolbarActionButton}
-                  disabled={!imageSrc || isBaking}
-                  title="Bake the current output as the next input image"
-                  onClick={handleBakeClick}
-                >
-                  Bake
-                </Button>
-                <Button
-                  type="button"
-                  size="sm"
-                  className={toolbarActionButton}
-                  disabled={!imageSrc}
-                  title="Zero effects and smears; restore Cell Pattern and Noise Mask defaults (keeps grain)"
-                  onClick={resetGenerationParameters}
-                >
-                  Reset
-                </Button>
-                <Button
-                  type="button"
-                  size="sm"
-                  className={toolbarActionButton}
-                  disabled={!imageSrc}
-                  title="Save a thumbnail of this result to History"
-                  onClick={handleCapture}
-                >
-                  Capture
-                </Button>
-                <Button
-                  size="sm"
-                  className={toolbarActionButton}
-                  disabled={!imageSrc || isExportingPng}
-                  onClick={exportHighResImage}
-                >
-                  Save
-                </Button>
-            </div>
-          </div>
+          <CanvasViewport
+            imageSrc={imageSrc}
+            liveCanvasRef={liveCanvasRef}
+            fileInputRef={fileInputRef}
+            handleDragOver={handleDragOver}
+            handleDragEnter={handleDragEnter}
+            handleDragLeave={handleDragLeave}
+            handleDrop={handleDrop}
+            isDragging={isDragging}
+            uploadError={uploadError}
+            previewItem={previewItem}
+            cancelPreview={cancelPreview}
+          />
+          <HeaderControls
+            previewing={previewing}
+            handleRestore={handleRestore}
+            cancelPreview={cancelPreview}
+            seed={seed}
+            setSeed={setSeed}
+            autoFillHistory={autoFillHistory}
+            historyIndex={historyIndex}
+            handleAutoFill={handleAutoFill}
+            handleAutoFillBack={handleAutoFillBack}
+            handleAutoFillForward={handleAutoFillForward}
+            imageSrc={imageSrc}
+            fileInputRef={fileInputRef}
+            isExportingPng={isExportingPng}
+            exportHighResImage={exportHighResImage}
+            handleBakeClick={handleBakeClick}
+            isBaking={isBaking}
+            resetGenerationParameters={resetGenerationParameters}
+            handleCapture={handleCapture}
+          />
         </div>
       </main>
 
       {visualHistory.length > 0 && (
-      <aside className="flex w-full shrink-0 flex-row items-center gap-2 px-3 py-2 lg:h-full lg:w-28 lg:flex-col lg:px-0 lg:py-3 lg:pl-1 lg:pr-3">
-        <button
-          type="button"
-          aria-label="Scroll history backward"
-          onClick={() => scrollHistory(-HISTORY_SCROLL_STEP)}
-          className="flex shrink-0 cursor-pointer items-center justify-center p-1 text-gray-300 hover:text-white lg:w-full"
-        >
-          <ChevronLeft className="h-4 w-4 lg:hidden" />
-          <ChevronUp className="hidden h-4 w-4 lg:block" />
-        </button>
-        <div
-          ref={historyScrollRef}
-          className="hide-scrollbar flex min-h-0 w-full flex-1 flex-row items-center gap-2 overflow-x-auto pt-1.5 lg:flex-col lg:overflow-x-hidden lg:overflow-y-auto lg:pt-0"
-        >
-          {visualHistory.map((snapshot) => (
-              <div
-                key={snapshot.id}
-                className="group relative flex shrink-0 items-center rounded-lg lg:gap-2"
-              >
-                <button
-                  type="button"
-                  aria-label="Preview this saved result"
-                  title="Preview this saved result"
-                  onClick={() => openPreview(snapshot)}
-                  className="aspect-square w-14 shrink-0 cursor-pointer overflow-hidden rounded-lg border border-white/10 transition-colors hover:border-white/30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-400/40"
-                >
-                  {/* eslint-disable-next-line @next/next/no-img-element -- small local data URL thumbnail, not an optimizable remote asset */}
-                  <img
-                    src={snapshot.thumbnail}
-                    alt=""
-                    className="h-full w-full object-cover transition-transform duration-150 group-hover:scale-105"
-                  />
-                </button>
-                <button
-                  type="button"
-                  aria-label="Delete this saved result"
-                  title="Delete"
-                  onClick={(event) => handleDeleteHistory(snapshot.id, event)}
-                  className="absolute -top-1.5 -right-1.5 z-10 flex h-5 w-5 shrink-0 cursor-pointer items-center justify-center rounded-full bg-red-700 text-white shadow-sm hover:bg-red-800 lg:static lg:top-auto lg:right-auto lg:z-auto"
-                >
-                  <X className="size-4" />
-                </button>
-              </div>
-          ))}
-        </div>
-        <button
-          type="button"
-          aria-label="Scroll history forward"
-          onClick={() => scrollHistory(HISTORY_SCROLL_STEP)}
-          className="flex shrink-0 cursor-pointer items-center justify-center p-1 text-gray-300 hover:text-white lg:w-full"
-        >
-          <ChevronRight className="h-4 w-4 lg:hidden" />
-          <ChevronDown className="hidden h-4 w-4 lg:block" />
-        </button>
-      </aside>
+        <HistoryFilmstrip
+          visualHistory={visualHistory}
+          historyScrollRef={historyScrollRef}
+          scrollHistory={scrollHistory}
+          openPreview={openPreview}
+          handleDeleteHistory={handleDeleteHistory}
+        />
       )}
       </div>
       </div>
@@ -2385,59 +1288,12 @@ export default function Home() {
         </a>
       </footer>
 
-      {bakeConfirmOpen && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center p-4"
-          role="presentation"
-        >
-          <button
-            type="button"
-            aria-label="Dismiss dialog"
-            className="absolute inset-0 bg-black/60 backdrop-blur-[2px]"
-            onClick={() => {
-              if (!isBaking) setBakeConfirmOpen(false)
-            }}
-          />
-          <div
-            role="alertdialog"
-            aria-modal="true"
-            aria-labelledby="bake-confirm-title"
-            className="relative z-10 w-full max-w-sm rounded-2xl border border-white/10 bg-slate-900/95 p-6 text-[#f5f5f7] shadow-[0_16px_48px_rgba(0,0,0,0.65)] backdrop-blur-xl"
-          >
-            <p
-              id="bake-confirm-title"
-              className="text-center font-body text-sm leading-relaxed text-slate-200"
-            >
-              This will replace your original image
-              <br />
-              and reset all parameters.
-            </p>
-            <div className="mt-6 flex items-center justify-center gap-3">
-              <Button
-                type="button"
-                size="sm"
-                variant="outline"
-                className="h-8 rounded-2xl border-white/10 bg-transparent px-4 text-xs font-semibold text-slate-300 shadow-none hover:bg-white/5 hover:text-slate-100"
-                disabled={isBaking}
-                onClick={() => setBakeConfirmOpen(false)}
-              >
-                Cancel
-              </Button>
-              <Button
-                type="button"
-                size="sm"
-                className={cn(toolbarActionButton, "h-8 px-4")}
-                disabled={isBaking}
-                onClick={() => {
-                  void confirmBake()
-                }}
-              >
-                {isBaking ? "Working…" : "Confirm"}
-              </Button>
-            </div>
-          </div>
-        </div>
-      )}
+      <BakeDialog
+        bakeConfirmOpen={bakeConfirmOpen}
+        setBakeConfirmOpen={setBakeConfirmOpen}
+        isBaking={isBaking}
+        confirmBake={confirmBake}
+      />
 
     </div>
   )

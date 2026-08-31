@@ -11,6 +11,18 @@ import {
   chooseSmear,
 } from "../lib/pipeline"
 import { applySmearStyles } from "../lib/smear-styles"
+import {
+  clearSlitScanFieldCache,
+  extractSlitScanParams,
+  gatherVectorDisplacement,
+  getSlitScanField,
+  noiseSampleStep,
+  slitScanAmplitude,
+  slitScanFrequency,
+  slitScanParamsEqual,
+  type SlitScanField,
+  type SlitScanParams,
+} from "../lib/slit-scan"
 
 const W = 200
 const H = 200
@@ -46,7 +58,7 @@ function makeSettings(overrides: Partial<EffectSettings> = {}): EffectSettings {
     recursiveWeight: 100,
     noiseScale: 19,
     noiseSpread: 50,
-    maxCellSize: 10,
+
     subdivisionLoops: 3,
     subdivisionMode: "frontier",
     subdivisionRate: 60,
@@ -58,6 +70,11 @@ function makeSettings(overrides: Partial<EffectSettings> = {}): EffectSettings {
     textureOpacity: 1,
     halftoneAmount: 0,
     weightThermal: 0,
+    weightSlitScan: 0,
+    slitScanAmount: 50,
+    slitScanFrequency: 50,
+    slitScanMode: "noise",
+    slitScanLuminanceMask: false,
     ...overrides,
   }
 }
@@ -88,7 +105,7 @@ function fingerprint(data: Uint8ClampedArray) {
   for (let y = 0; y < cell.height; y++) {
     for (let x = 0; x < cell.width; x++) {
       const i = ((cell.y + y) * W + (cell.x + x)) * 4
-      h = (h * 33 + data[i] + data[i + 1] * 3 + data[i + 2] * 7) | 0
+      h = (h * 33 + data[i]! + data[i + 1]! * 3 + data[i + 2]! * 7) | 0
     }
   }
   return h
@@ -240,9 +257,471 @@ assert(
       weightPixelate: 0,
       halftoneAmount: 0,
       weightThermal: 0,
+      weightSlitScan: 0,
     })
   ) === "original",
   "all effect weights 0 → Original"
+)
+
+/* ── Slit Scan: pool membership + the field/gather split ─────────────────── */
+
+const slitScanOnly = makeSettings({
+  weightOriginal: 0,
+  weightSlitScan: 50,
+})
+assert(
+  chooseEffect(0.49, slitScanOnly) === "slitscan",
+  "solo Slit Scan 50: randomVal 0.49 is Slit Scan"
+)
+assert(
+  chooseEffect(0.5, slitScanOnly) === "original",
+  "solo Slit Scan 50: randomVal 0.5 falls through to Original (base-100 padding)"
+)
+
+// Zero weight must not shift any other effect's bucket — this is what keeps
+// saved settings and History snapshots rendering identically after the add.
+assert(
+  chooseEffect(0.49, makeSettings({ weightOriginal: 0, weightInvert: 50 })) ===
+    "invert" &&
+    chooseEffect(
+      0.49,
+      makeSettings({ weightOriginal: 0, weightInvert: 50, weightSlitScan: 0 })
+    ) === "invert",
+  "Slit Scan at 0 leaves existing effect buckets untouched"
+)
+
+// Above base-100 the pool competes relatively, and one Cell still gets exactly
+// one effect — Slit Scan is not additive on top of Invert.
+const invertVsSlitScan = makeSettings({
+  weightOriginal: 0,
+  weightInvert: 100,
+  weightSlitScan: 100,
+})
+assert(
+  chooseEffect(0.49, invertVsSlitScan) === "invert",
+  "Invert 100 + Slit Scan 100: randomVal 0.49 is Invert"
+)
+assert(
+  chooseEffect(0.5, invertVsSlitScan) === "slitscan",
+  "Invert 100 + Slit Scan 100: randomVal 0.5 is Slit Scan (exclusive, 50/50 split)"
+)
+
+clearSlitScanFieldCache()
+const baseParams = extractSlitScanParams(makeSettings(), W, H)
+
+/** The field key is `SlitScanParams` minus `amount` — built explicitly so the
+ *  excess-property check does not hide a genuine key mismatch. */
+function fieldKey(p: SlitScanParams) {
+  return {
+    width: p.width,
+    height: p.height,
+    seed: p.seed,
+    frequency: p.frequency,
+    mode: p.mode,
+  }
+}
+
+const field = getSlitScanField(fieldKey(baseParams))
+assert(
+  field.vectors.length === W * H * 2,
+  "vector field carries an (x, y) pair for every pixel"
+)
+
+/* ── 2D: both axes driven, and the flow is incompressible ───────────────── */
+let maxAbsX = 0
+let maxAbsY = 0
+let maxMagnitude = 0
+for (let i = 0; i < W * H; i++) {
+  const dx = field.vectors[i * 2]!
+  const dy = field.vectors[i * 2 + 1]!
+  if (Math.abs(dx) > maxAbsX) maxAbsX = Math.abs(dx)
+  if (Math.abs(dy) > maxAbsY) maxAbsY = Math.abs(dy)
+  const mag = Math.sqrt(dx * dx + dy * dy)
+  if (mag > maxMagnitude) maxMagnitude = mag
+}
+assert(maxAbsX > 0.05, "field drives X displacement (no longer vertical-only)")
+assert(maxAbsY > 0.05, "field drives Y displacement")
+assert(
+  maxAbsX <= 1.0001 && maxAbsY <= 1.0001,
+  "field stays normalized to [-1, 1] (amplitude is applied at gather time)"
+)
+assert(
+  Math.abs(maxMagnitude - 1) < 1e-3,
+  "strongest vortex normalizes to magnitude 1 (anchors slitScanAmount)"
+)
+
+/**
+ * Curl noise is divergence-free by construction — the defining property, and
+ * what stops the warp from piling pixels up and tearing them apart. Measures
+ * mean|dvx/dx + dvy/dy| against mean(|dvx/dx| + |dvy/dy|): the terms must
+ * cancel. Stencil spacing matches the grid the curl was differenced on.
+ */
+function divergenceRatio(f: SlitScanField, s: number) {
+  let sumDiv = 0
+  let sumTerms = 0
+  const at = (x: number, y: number, axis: 0 | 1) =>
+    f.vectors[(y * f.width + x) * 2 + axis]!
+  for (let y = s; y < f.height - s; y += 2) {
+    for (let x = s; x < f.width - s; x += 2) {
+      const dvx = at(x + s, y, 0) - at(x - s, y, 0)
+      const dvy = at(x, y + s, 1) - at(x, y - s, 1)
+      sumDiv += Math.abs(dvx + dvy)
+      sumTerms += Math.abs(dvx) + Math.abs(dvy)
+    }
+  }
+  return sumDiv / (sumTerms || 1)
+}
+/** Radial source: maximally compressible, so the metric above must flag it. */
+function radialControlField(): SlitScanField {
+  const vectors = new Float32Array(W * H * 2)
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      const o = (y * W + x) * 2
+      vectors[o] = (x - W / 2) / (W / 2)
+      vectors[o + 1] = (y - H / 2) / (H / 2)
+    }
+  }
+  return { width: W, height: H, vectors }
+}
+const curlStep = noiseSampleStep(W, slitScanFrequency(baseParams.frequency))
+assert(
+  divergenceRatio(field, curlStep) < 0.05,
+  "curl field is divergence-free (incompressible: vortices, not pile-up)"
+)
+assert(
+  divergenceRatio(radialControlField(), 4) > 0.5,
+  "the divergence metric does flag a compressible control field"
+)
+
+/* ── The invalidation seam ───────────────────────────────────────────────────
+ * Every member of SlitScanParams must miss the master cache; nothing else may.
+ * The second half is the 60fps guarantee: dragging smear or an effect weight
+ * must not rebuild the master.
+ */
+for (const [label, mutate] of [
+  ["width", (p: SlitScanParams) => ({ ...p, width: p.width + 1 })],
+  ["height", (p: SlitScanParams) => ({ ...p, height: p.height + 1 })],
+  ["seed", (p: SlitScanParams) => ({ ...p, seed: p.seed + 1 })],
+  ["amount", (p: SlitScanParams) => ({ ...p, amount: p.amount + 1 })],
+  ["frequency", (p: SlitScanParams) => ({ ...p, frequency: p.frequency + 1 })],
+  ["mode", (p: SlitScanParams) => ({ ...p, mode: "vertical" as const })],
+  [
+    "luminanceMask",
+    (p: SlitScanParams) => ({ ...p, luminanceMask: !p.luminanceMask }),
+  ],
+] as const) {
+  assert(
+    !slitScanParamsEqual(baseParams, mutate(baseParams)),
+    `master key: ${label} change invalidates the Slit Scan master`
+  )
+}
+
+for (const [label, override] of [
+  ["smear amount", { smearHorizontal: { enabled: true, amount: 80 } }],
+  ["smear weight", { horizontalWeight: 90 }],
+  ["effect weight", { weightInvert: 80 }],
+  ["Slit Scan weight", { weightSlitScan: 80 }],
+  ["noise scale", { noiseScale: 80 }],
+  ["passes", { passes: 3 }],
+  ["grain", { textureOpacity: 0.2 }],
+] as const) {
+  assert(
+    slitScanParamsEqual(
+      baseParams,
+      extractSlitScanParams(makeSettings(override), W, H)
+    ),
+    `master key: ${label} change reuses the master (no rebuild on drag)`
+  )
+}
+
+/* ── Field cache: strictly coarser than the master key ───────────────────── */
+assert(
+  getSlitScanField(fieldKey(baseParams)) === field,
+  "field cache hits on an equal key (structural, not identity)"
+)
+assert(
+  getSlitScanField(fieldKey({ ...baseParams, amount: 5 })) === field,
+  "amount is NOT in the field key — dragging Amount re-runs only the gather"
+)
+assert(
+  getSlitScanField(fieldKey({ ...baseParams, frequency: 90 })) !== field,
+  "field cache misses on a frequency change"
+)
+assert(
+  getSlitScanField(fieldKey({ ...baseParams, seed: 7 })) !== field,
+  "field cache misses on a seed change"
+)
+
+/* ── Slit Scan Mode: which axes the displacement may move along ──────────────
+ * The axis modes are deliberately NOT divergence-free (a field confined to one
+ * axis cannot be), so the incompressibility check above stays on "noise".
+ */
+assert(
+  getSlitScanField(fieldKey({ ...baseParams, mode: "horizontal" })) !== field,
+  "field cache misses on a mode change"
+)
+
+function axisPeaks(f: SlitScanField) {
+  let x = 0
+  let y = 0
+  for (let i = 0; i < f.width * f.height; i++) {
+    const dx = Math.abs(f.vectors[i * 2]!)
+    const dy = Math.abs(f.vectors[i * 2 + 1]!)
+    if (dx > x) x = dx
+    if (dy > y) y = dy
+  }
+  return { x, y }
+}
+
+const hPeaks = axisPeaks(
+  getSlitScanField(fieldKey({ ...baseParams, mode: "horizontal" }))
+)
+assert(hPeaks.y === 0, "horizontal mode forces dy to 0 (no vertical movement)")
+assert(
+  Math.abs(hPeaks.x - 1) < 1e-3,
+  "horizontal mode renormalizes dx to 1, so Amount still means the same pixels"
+)
+
+const vPeaks = axisPeaks(
+  getSlitScanField(fieldKey({ ...baseParams, mode: "vertical" }))
+)
+assert(vPeaks.x === 0, "vertical mode forces dx to 0 (no horizontal movement)")
+assert(
+  Math.abs(vPeaks.y - 1) < 1e-3,
+  "vertical mode renormalizes dy to 1, so Amount still means the same pixels"
+)
+
+/* The luminance mask is a gather-time scalar, so it must sit on the master key
+ * (checked above) and stay off the field key - the same split `amount` gets. */
+const noiseBaseline = getSlitScanField(fieldKey(baseParams))
+assert(
+  getSlitScanField(fieldKey({ ...baseParams, luminanceMask: true })) ===
+    noiseBaseline,
+  "luminanceMask is NOT in the field key - toggling it re-runs only the gather"
+)
+
+/* ── Parameter mappings ─────────────────────────────────────────────────── */
+/** Sign changes along the top row — a cheap proxy for spatial frequency. */
+function reversals(f: SlitScanField, axis: 0 | 1) {
+  let n = 0
+  for (let x = 1; x < f.width; x++) {
+    const prev = f.vectors[(x - 1) * 2 + axis]!
+    const cur = f.vectors[x * 2 + axis]!
+    if (prev < 0 !== cur < 0) n++
+  }
+  return n
+}
+assert(
+  reversals(getSlitScanField(fieldKey({ ...baseParams, frequency: 95 })), 0) >
+    reversals(getSlitScanField(fieldKey({ ...baseParams, frequency: 5 })), 0),
+  "slitScanFrequency increases how often the field reverses direction"
+)
+
+assert(
+  slitScanAmplitude(50, 1000) > 0 && slitScanAmplitude(0, 1000) === 0,
+  "amplitude mapping is anchored at 0"
+)
+/* Recalibrated maxima: UI 100 now lands where the old curve's UI 70 (amount)
+ * and UI 40 (frequency) did. Pinned as absolutes so a future re-tune has to be
+ * deliberate rather than incidental. */
+assert(
+  slitScanAmplitude(100, 1000) === 245,
+  "amount 100 peaks at 24.5% of height (the old amount 70)"
+)
+assert(
+  slitScanAmplitude(50, 1000) === 122.5,
+  "amplitude stays linear across the recalibrated range"
+)
+assert(
+  Math.abs(slitScanFrequency(100) - 3.5652) < 1e-3,
+  "frequency 100 tops out at ~3.57 cells (the old frequency 40)"
+)
+assert(
+  slitScanFrequency(0) === 1,
+  "frequency 0 still bottoms out at a single noise cell"
+)
+assert(
+  slitScanFrequency(0) < slitScanFrequency(50) &&
+    slitScanFrequency(50) < slitScanFrequency(100),
+  "frequency mapping is monotonic across the UI range"
+)
+
+/* ── Gather: 2D lookup and edge clamping ────────────────────────────────────
+ * Coordinates are encoded into the pixels (R = source x, G = source y), so the
+ * assertions below pin the exact texel each output pixel was read from.
+ */
+function paintCoords(data: Uint8ClampedArray) {
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      const i = (y * W + x) * 4
+      data[i] = x
+      data[i + 1] = y
+      data[i + 2] = 0
+      data[i + 3] = 255
+    }
+  }
+}
+function uniformField(dx: number, dy: number): SlitScanField {
+  const vectors = new Float32Array(W * H * 2)
+  for (let i = 0; i < W * H; i++) {
+    vectors[i * 2] = dx
+    vectors[i * 2 + 1] = dy
+  }
+  return { width: W, height: H, vectors }
+}
+function sampledAt(out: Uint8ClampedArray, x: number, y: number) {
+  const i = (y * W + x) * 4
+  return { x: out[i]!, y: out[i + 1]! }
+}
+
+const coords = new Uint8ClampedArray(W * H * 4)
+paintCoords(coords)
+
+const identity = gatherVectorDisplacement(coords, uniformField(1, 1), 0)
+assert(
+  fingerprint(identity) === fingerprint(coords),
+  "gather at amplitude 0 is an exact copy (Slit Scan becomes a pass-through)"
+)
+
+const pushedX = sampledAt(gatherVectorDisplacement(coords, uniformField(1, 0), 10), 50, 50)
+assert(
+  pushedX.x === 60 && pushedX.y === 50,
+  "gather applies the X offset (dx=+1, amp=10 reads 10px to the right)"
+)
+const pushedY = sampledAt(gatherVectorDisplacement(coords, uniformField(0, 1), 10), 50, 50)
+assert(
+  pushedY.x === 50 && pushedY.y === 60,
+  "gather applies the Y offset (dy=+1, amp=10 reads 10px down)"
+)
+const pushedDiag = sampledAt(
+  gatherVectorDisplacement(coords, uniformField(-1, -1), 10),
+  50,
+  50
+)
+assert(
+  pushedDiag.x === 40 && pushedDiag.y === 40,
+  "gather applies both axes at once, and negative vectors read up/left"
+)
+
+const farPositive = sampledAt(
+  gatherVectorDisplacement(coords, uniformField(1, 1), 10000),
+  50,
+  50
+)
+assert(
+  farPositive.x === W - 1 && farPositive.y === H - 1,
+  "both axes clamp to the far edge instead of wrapping"
+)
+const farNegative = sampledAt(
+  gatherVectorDisplacement(coords, uniformField(-1, -1), 10000),
+  50,
+  50
+)
+assert(
+  farNegative.x === 0 && farNegative.y === 0,
+  "both axes clamp to the near edge instead of wrapping"
+)
+let opaque = true
+const clampedOut = gatherVectorDisplacement(coords, uniformField(1, 1), 10000)
+for (let i = 3; i < clampedOut.length; i += 4) {
+  if (clampedOut[i] !== 255) {
+    opaque = false
+    break
+  }
+}
+assert(opaque, "clamped lookups stay opaque (no transparent holes at the edges)")
+
+const warped = gatherVectorDisplacement(
+  coords,
+  getSlitScanField(fieldKey(baseParams)),
+  slitScanAmplitude(80, H)
+)
+let movedHorizontally = false
+for (let y = 0; y < H && !movedHorizontally; y++) {
+  for (let x = 0; x < W; x++) {
+    if (sampledAt(warped, x, y).x !== x) {
+      movedHorizontally = true
+      break
+    }
+  }
+}
+assert(
+  movedHorizontally,
+  "the real field moves pixels horizontally (2D warp, not a vertical stretch)"
+)
+
+/* ── Luminance gather: offset from brightness, not from the field ────────────
+ * Alpha carries the source coordinate. Luminance is (R+G+B)/765, so alpha is
+ * free to trace exactly which texel each output pixel was read from.
+ */
+function paintLumProbe(
+  data: Uint8ClampedArray,
+  level: (x: number) => number,
+  tag: (x: number, y: number) => number
+) {
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      const i = (y * W + x) * 4
+      const v = level(x)
+      data[i] = v
+      data[i + 1] = v
+      data[i + 2] = v
+      data[i + 3] = tag(x, y)
+    }
+  }
+}
+function readAlpha(out: Uint8ClampedArray, x: number, y: number) {
+  return out[(y * W + x) * 4 + 3]!
+}
+
+/* The luminance mask scales the displacement by pixel brightness. A uniform
+ * field isolates it: every pixel would move the same distance, so any variation
+ * in where they read from is the mask alone. */
+const split = new Uint8ClampedArray(W * H * 4)
+paintLumProbe(split, (x) => (x < W / 2 ? 0 : 255), (x) => x)
+
+const masked = gatherVectorDisplacement(split, uniformField(1, 0), 10, true)
+assert(
+  readAlpha(masked, 50, 50) === 50,
+  "mask on: a black pixel takes 0% of the displacement (holds still)"
+)
+assert(
+  readAlpha(masked, 150, 50) === 160,
+  "mask on: a white pixel takes 100% of the displacement"
+)
+
+const unmasked = gatherVectorDisplacement(split, uniformField(1, 0), 10, false)
+assert(
+  readAlpha(unmasked, 50, 50) === 60 && readAlpha(unmasked, 150, 50) === 160,
+  "mask off: brightness is ignored and every pixel takes the full vector"
+)
+
+const flat = new Uint8ClampedArray(W * H * 4)
+paintLumProbe(flat, () => 128, (x) => x)
+assert(
+  readAlpha(gatherVectorDisplacement(flat, uniformField(1, 0), 10, true), 50, 50) ===
+    55,
+  "mask on: a mid-grey pixel takes about half"
+)
+
+/* The mask multiplies the vector, so it dials both axes down together. */
+const rows = new Uint8ClampedArray(W * H * 4)
+paintLumProbe(rows, () => 0, (_x, y) => y)
+assert(
+  readAlpha(gatherVectorDisplacement(rows, uniformField(0, 1), 10, true), 100, 50) ===
+    50,
+  "mask on: a black pixel holds still on the Y axis too"
+)
+assert(
+  readAlpha(gatherVectorDisplacement(rows, uniformField(0, 1), 10, false), 100, 50) ===
+    60,
+  "mask off: the same pixel takes the full Y displacement"
+)
+
+assert(
+  fingerprint(gatherVectorDisplacement(split, uniformField(1, 1), 0, true)) ===
+    fingerprint(split),
+  "masked gather at amplitude 0 is still an exact copy"
 )
 
 const a = new Uint8ClampedArray(W * H * 4)
