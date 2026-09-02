@@ -1,6 +1,6 @@
 import type { Metadata, Viewport } from "next"
 import { Geist, Geist_Mono } from "next/font/google"
-import { getSiteUrl } from "@/lib/site"
+import { getSiteUrl, isSearchIndexable } from "@/lib/site"
 import "./globals.css"
 
 const geistSans = Geist({
@@ -14,6 +14,7 @@ const geistMono = Geist_Mono({
 })
 
 const siteUrl = getSiteUrl()
+const searchIndexable = isSearchIndexable()
 
 const title = "Pixel By Day | Generative Pixel Effects"
 const description = "Distort your images using abstract pixel effects."
@@ -61,17 +62,27 @@ export const metadata: Metadata = {
     title: "Pixel By Day",
     statusBarStyle: "black-translucent",
   },
-  robots: {
-    index: true,
-    follow: true,
-    googleBot: {
-      index: true,
-      follow: true,
-      "max-image-preview": "large",
-      "max-snippet": -1,
-      "max-video-preview": -1,
-    },
-  },
+  robots: searchIndexable
+    ? {
+        index: true,
+        follow: true,
+        googleBot: {
+          index: true,
+          follow: true,
+          "max-image-preview": "large",
+          "max-snippet": -1,
+          "max-video-preview": -1,
+        },
+      }
+    : {
+        index: false,
+        follow: false,
+        googleBot: {
+          index: false,
+          follow: false,
+          noimageindex: true,
+        },
+      },
   alternates: {
     canonical: "/",
   },

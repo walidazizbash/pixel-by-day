@@ -12,9 +12,9 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import type {
   EffectSettings,
-  LivePlayMode,
   SlitScanMode,
   SmearStyleSettings,
+  SpeedRampPoint,
   SubdivisionMode,
 } from "@/lib/effect-types"
 import { BakeDialog } from "@/components/BakeDialog"
@@ -43,6 +43,7 @@ import {
   pageTitle,
 } from "@/components/controls/styles"
 import { MAX_DECODE_EDGE, MAX_DECODE_PIXELS } from "@/lib/constants"
+import { DEFAULT_SPEED_RAMP } from "@/lib/speed-ramp"
 import { useAppWorkers } from "@/hooks/useAppWorkers"
 import { cn } from "@/lib/utils"
 
@@ -181,6 +182,10 @@ function cloneEffectSettings(settings: EffectSettings): EffectSettings {
   }
 }
 
+function cloneSpeedRamp(points: readonly SpeedRampPoint[]): SpeedRampPoint[] {
+  return points.map((p) => ({ x: p.x, y: p.y }))
+}
+
 function buildDefaultEffectSettings(): EffectSettings {
   return {
     seed: DEFAULT_SEED,
@@ -190,8 +195,8 @@ function buildDefaultEffectSettings(): EffectSettings {
     weightPixelate: CONTROL_DEFAULTS.weightPixelate,
     weightOriginal: CONTROL_DEFAULTS.weightOriginal,
     randomSample: false,
-    smearVertical: defaultSmear(false, SMEAR_AMOUNT_DEFAULTS.vertical),
-    smearHorizontal: defaultSmear(true, SMEAR_AMOUNT_DEFAULTS.horizontal),
+    smearVertical: defaultSmear(true, SMEAR_AMOUNT_DEFAULTS.vertical),
+    smearHorizontal: defaultSmear(false, SMEAR_AMOUNT_DEFAULTS.horizontal),
     smearDiagonal1: defaultSmear(false, SMEAR_AMOUNT_DEFAULTS.diagonal1),
     smearDiagonal2: defaultSmear(false, SMEAR_AMOUNT_DEFAULTS.diagonal2),
     smearRecursive: defaultSmear(false, SMEAR_AMOUNT_DEFAULTS.recursive),
@@ -399,10 +404,10 @@ export default function Home() {
   const [isBaking, setIsBaking] = useState(false)
   const [randomSample, setRandomSample] = useState(false)
   const [smearVertical, setSmearVertical] = useState(() =>
-    defaultSmear(false, SMEAR_AMOUNT_DEFAULTS.vertical)
+    defaultSmear(true, SMEAR_AMOUNT_DEFAULTS.vertical)
   )
   const [smearHorizontal, setSmearHorizontal] = useState(() =>
-    defaultSmear(true, SMEAR_AMOUNT_DEFAULTS.horizontal)
+    defaultSmear(false, SMEAR_AMOUNT_DEFAULTS.horizontal)
   )
   const [smearDiagonal1, setSmearDiagonal1] = useState(() =>
     defaultSmear(false, SMEAR_AMOUNT_DEFAULTS.diagonal1)
@@ -503,17 +508,14 @@ export default function Home() {
   const [backupSettings, setBackupSettings] = useState<EffectSettings | null>(
     null
   )
+  /** Speed ramp stashed with `backupSettings` for History Cancel — not in EffectSettings. */
+  const [backupSpeedRamp, setBackupSpeedRamp] = useState<SpeedRampPoint[] | null>(
+    null
+  )
   const previewing = previewItem !== null
   /** Live Play on/off. The offset itself never enters state — see the rAF loop below. */
   const [isPlaying, setIsPlaying] = useState(false)
   const togglePlaying = useCallback(() => setIsPlaying((prev) => !prev), [])
-  /**
-   * Which Live Play behavior runs. Both scroll the pixels inside static Cells;
-   * `fixed` slides the smear along with them, `dynamic` pins it to the Cell so
-   * the effects churn. Unlike the offset this changes at human speed, so state
-   * is fine.
-   */
-  const [livePlayMode, setLivePlayMode] = useState<LivePlayMode>("fixed")
   /** Live Play scroll speed, in pixels per rendered frame. */
   const [livePlaySpeed, setLivePlaySpeed] = useState<number>(
     LIVE_PLAY_SPEED.default
@@ -552,6 +554,16 @@ export default function Home() {
     livePlaySpeedRef.current = clamped
     setLivePlaySpeed(clamped)
   }, [])
+  /**
+   * Live Play speed ramp: each Cell's fixed position along the ramp's X axis
+   * (see `lib/speed-ramp.ts`) picks its Y multiplier on the shared scroll
+   * offset. While playing, the next live frame reads the latest curve via
+   * `useAppWorkers`. While paused at a nonzero offset, the hook also schedules
+   * a regen so the canvas tracks curve edits without waiting for Play.
+   */
+  const [speedRamp, setSpeedRamp] = useState<SpeedRampPoint[]>([
+    ...DEFAULT_SPEED_RAMP,
+  ])
   const fileInputRef = useRef<HTMLInputElement>(null)
   const liveCanvasRef = useRef<HTMLCanvasElement>(null)
   const historyScrollRef = useRef<HTMLDivElement>(null)
@@ -767,21 +779,23 @@ export default function Home() {
     exportHighResImage,
     capturePhase2PngBlob,
     renderLiveFrame,
-    applyLivePlayMode,
+    setLiveOffsetY,
+    getPaintedLiveOffsetY,
   } = useAppWorkers({
       settings: effectSettings,
       imageSrc,
       // The preview modal paints an opaque overlay across the canvas, so the renders
       // that `openPreview`'s settings swap would otherwise kick off are never seen.
       paused: previewing,
+      speedRamp,
       onPreviewFrame,
       onSourcePreview,
     })
 
   /**
    * Live Play — the Cell grid holds still while the pixels inside each Cell scroll
-   * downward and wrap at that Cell's own borders. `fixed` carries the smear along
-   * with them; `dynamic` pins it to the Cell so the effects re-form every frame.
+   * downward and wrap at that Cell's own borders, pinned to the Cell so the effects
+   * re-form every frame.
    *
    * The loop talks to the effect worker directly through `renderLiveFrame`, and
    * deliberately never calls `setEffectSettings`: this tree is unmemoized, so a
@@ -796,35 +810,21 @@ export default function Home() {
    * is exactly what the Speed slider is there to compensate for.
    *
    * Speed is read from a ref, so changing it never restarts the loop; the offset
-   * is left alone by both speed and mode changes, so neither moves the picture.
+   * is left alone by a speed change, so it never moves the picture.
    */
   useEffect(() => {
     if (!isPlaying || !imageSrc || previewing) return
 
     let frame = requestAnimationFrame(function tick() {
       const next = livePlayOffsetRef.current + livePlaySpeedRef.current
-      if (renderLiveFrame(next, livePlayMode)) {
+      if (renderLiveFrame(next)) {
         livePlayOffsetRef.current = next
       }
       frame = requestAnimationFrame(tick)
     })
 
     return () => cancelAnimationFrame(frame)
-  }, [isPlaying, imageSrc, previewing, livePlayMode, renderLiveFrame])
-
-  /**
-   * Swapping modes repaints at the offset already on screen, whether playing or
-   * paused. `applyLivePlayMode` commits the mode and queues that repaint through
-   * the same path a slider uses, so it cannot be lost to backpressure the way an
-   * animation frame can — while paused, nothing would ever come along to retry it.
-   */
-  const handleLivePlayModeChange = useCallback(
-    (mode: LivePlayMode) => {
-      setLivePlayMode(mode)
-      applyLivePlayMode(mode)
-    },
-    [applyLivePlayMode]
-  )
+  }, [isPlaying, imageSrc, previewing, renderLiveFrame])
 
   function processFile(file: File) {
     if (!isAllowedImageFile(file)) {
@@ -859,15 +859,15 @@ export default function Home() {
     })()
   }
 
-  function handleShowNoiseMapChange(checked: boolean) {
+  const handleShowNoiseMapChange = useCallback((checked: boolean) => {
     setShowNoiseMap(checked)
     if (checked) setShowCellLayout(false)
-  }
+  }, [])
 
-  function handleShowCellLayoutChange(checked: boolean) {
+  const handleShowCellLayoutChange = useCallback((checked: boolean) => {
     setShowCellLayout(checked)
     if (checked) setShowNoiseMap(false)
-  }
+  }, [])
 
   /**
    * Append snapshots onto the Random undo stack, dropping any redo future and
@@ -929,26 +929,59 @@ export default function Home() {
     if (!ctx) return
     ctx.drawImage(canvas, 0, 0, HISTORY_THUMBNAIL_WIDTH, thumbHeight)
 
-    const thumbnail = offscreen.toDataURL("image/jpeg", 0.6)
+    const thumbnail = offscreen.toDataURL("image/webp", 0.85)
     // Cloned now because the live settings keep mutating; the callback's other
     // captures (imageSrc, previewItem) are already frozen by the closure.
     const capturedSettings = cloneEffectSettings(effectSettings)
     const capturedImageSrc = imageSrc
+    // The Live Play scroll position and speed ramp behind the pixels on screen —
+    // not part of EffectSettings, so they have to be captured separately or
+    // Restore would reproduce the right settings at the wrong scroll / curve.
+    // Use the *painted* offset (last frame drawn), not the Live Play dispatch
+    // cursor which can already be one+ frames ahead while a job is in flight.
+    const capturedOffsetY = getPaintedLiveOffsetY()
+    const capturedSpeedRamp = cloneSpeedRamp(speedRamp)
     const previewedId = previewItem?.id
 
-    // Lossless capture of the live canvas (already capped at MAX_PREVIEW_DIMENSION),
-    // kept as a blob URL rather than a data URL so it stays off the JS string heap.
-    canvas.toBlob((blob) => {
-      captureIdRef.current += 1
-      const snapshot: HistorySnapshot = {
-        id: `capture-${captureIdRef.current}`,
-        thumbnail,
-        previewSrc: blob ? URL.createObjectURL(blob) : null,
-        imageSrc: capturedImageSrc,
-        effectSettings: capturedSettings,
-      }
-      setVisualHistory((prev) => capVisualHistory([snapshot, ...prev], previewedId))
-    }, "image/png")
+    // Preview-size capture (already capped at MAX_PREVIEW_DIMENSION), kept as a
+    // WebP blob URL rather than a data URL so it stays off the JS string heap.
+    canvas.toBlob(
+      (blob) => {
+        captureIdRef.current += 1
+        const snapshot: HistorySnapshot = {
+          id: `capture-${captureIdRef.current}`,
+          thumbnail,
+          previewSrc: blob ? URL.createObjectURL(blob) : null,
+          imageSrc: capturedImageSrc,
+          effectSettings: capturedSettings,
+          offsetY: capturedOffsetY,
+          speedRamp: capturedSpeedRamp,
+        }
+        setVisualHistory((prev) =>
+          capVisualHistory([snapshot, ...prev], previewedId)
+        )
+      },
+      "image/webp",
+      0.9
+    )
+  }
+
+  /**
+   * Wipe every History snapshot and free their blob URLs immediately.
+   * Dismisses an open preview via `cancelPreview` so controls rewind the same
+   * way Cancel / Escape / deleting the pinned snapshot do.
+   */
+  function handleClearAllHistory() {
+    if (previewItem) cancelPreview()
+    const toClear = visualHistory
+    setVisualHistory([])
+    for (const gone of toClear) {
+      if (gone.previewSrc) URL.revokeObjectURL(gone.previewSrc)
+      releaseSourceBlob(gone.imageSrc, {
+        liveImageSrc: imageSrc,
+        history: [],
+      })
+    }
   }
 
   /** Instantly remove one History thumbnail and free its blobs if nothing else needs them. */
@@ -982,23 +1015,38 @@ export default function Home() {
   function openPreview(snapshot: HistorySnapshot) {
     if (!previewing) {
       setBackupSettings(cloneEffectSettings(effectSettings))
+      setBackupSpeedRamp(cloneSpeedRamp(speedRamp))
     }
+    // Live Play stays paused after the modal closes too — Restore and Cancel
+    // both leave `isPlaying` alone, so resuming is always a deliberate Play click.
+    setIsPlaying(false)
     applyFullEffectSettings(snapshot.effectSettings)
+    setSpeedRamp(cloneSpeedRamp(snapshot.speedRamp))
     setPreviewItem(snapshot)
     // Switching the pin from A to B must evict A if it was only kept as the extra slot.
     setVisualHistory((prev) => capVisualHistory(prev, snapshot.id))
   }
 
-  /** Restore the previewed snapshot: load its image as the live working state. */
+  /** Restore the previewed snapshot: load its image, scroll, and speed ramp as the live working state. */
   function handleRestore() {
     if (!previewItem) return
-    const { imageSrc: restoredSrc } = previewItem
+    const { imageSrc: restoredSrc, offsetY, speedRamp: restoredRamp } =
+      previewItem
     setVisualHistory((prev) => capVisualHistory(prev, undefined))
     setImageSrc(restoredSrc)
-    // The snapshot's settings went live back in `openPreview`, so restoring them is just a
-    // matter of dropping the backup — re-applying here would only churn the smear object
-    // identities `useAppWorkers` watches and cost a redundant worker render.
+    // The snapshot's settings and ramp went live back in `openPreview`, so
+    // restoring them is just a matter of dropping the backups — re-applying
+    // settings here would only churn smear object identities `useAppWorkers`
+    // watches and cost a redundant worker render.
     setBackupSettings(null)
+    setBackupSpeedRamp(null)
+    setSpeedRamp(cloneSpeedRamp(restoredRamp))
+    // Both refs the offset lives in: the hook's, which the next dispatch reads
+    // when this same click flips `paused` false and forces that render; and the
+    // page's own, so a later Play resumes the scroll from here instead of from
+    // wherever Live Play was when the preview opened.
+    livePlayOffsetRef.current = offsetY
+    setLiveOffsetY(offsetY)
     setPreviewItem(null)
   }
 
@@ -1018,6 +1066,11 @@ export default function Home() {
   /** Open the Bake confirmation modal (pre-grain Phase 2 capture on confirm). */
   function handleBakeClick() {
     if (!imageSrc || isBaking) return
+    // Freeze Live Play the instant the dialog opens: `confirmBake` captures whatever
+    // Phase 2 frame is currently retained, and that must still be the frame the user
+    // saw behind the dialog, not one a few more scroll ticks further along. Cancel /
+    // backdrop / Escape never touch `isPlaying`, so this also leaves it paused on exit.
+    setIsPlaying(false)
     setBakeConfirmOpen(true)
   }
 
@@ -1040,6 +1093,16 @@ export default function Home() {
       // zeroed controls in one render — no frame showing the old image un-effected.
       setImageSrc(url)
       applyFullEffectSettings(neutral)
+      // Baked pixels already have the scroll baked in — Live Play on the new base
+      // starts fresh from the top rather than resuming wherever the old image left off.
+      // `isPlaying` stays untouched (paused since the dialog opened), so it stays paused.
+      // Match the dialog copy ("reset all parameters"): clear the speed ramp and
+      // play speed too — not only EffectSettings / offset.
+      livePlayOffsetRef.current = 0
+      setLiveOffsetY(0)
+      setSpeedRamp([...DEFAULT_SPEED_RAMP])
+      setLivePlaySpeed(LIVE_PLAY_SPEED.default)
+      livePlaySpeedRef.current = LIVE_PLAY_SPEED.default
       // Seed Random's undo stack with what actually went live, or stepping back would
       // restore parameters the canvas never had.
       seedRandomHistory(neutral)
@@ -1122,10 +1185,14 @@ export default function Home() {
     if (backupSettings) {
       applyFullEffectSettings(backupSettings)
     }
+    if (backupSpeedRamp) {
+      setSpeedRamp(cloneSpeedRamp(backupSpeedRamp))
+    }
     setBackupSettings(null)
+    setBackupSpeedRamp(null)
     setPreviewItem(null)
     setVisualHistory((prev) => capVisualHistory(prev, undefined))
-  }, [backupSettings, applyFullEffectSettings])
+  }, [backupSettings, backupSpeedRamp, applyFullEffectSettings])
 
   /**
    * Escape dismisses the History preview modal, same as the backdrop or Cancel.
@@ -1196,24 +1263,29 @@ export default function Home() {
         <header className="order-0 flex shrink-0 items-center px-4 py-3 lg:hidden">
           <h1 className={pageTitle}>Pixel By Day</h1>
         </header>
-        {/* While previewing, every control in this column dims and goes inert — but the
-            title (h1) and the mobile footer (p) stay at full strength. */}
+        {/* While previewing, panels dim and go truly inert (no pointer or tab
+            focus). The title (h1) and the mobile footer (p) stay interactive. */}
         <aside
+          aria-label="Effect controls"
+          className="order-2 flex min-h-0 w-full flex-1 flex-col gap-4 overflow-x-hidden overflow-y-auto border-none bg-transparent p-4 pb-[max(1.5rem,env(safe-area-inset-bottom))] lg:order-1 lg:h-full lg:w-80 lg:flex-none lg:shrink-0 lg:gap-6 lg:overflow-y-auto lg:p-6 lg:pb-8"
+        >
+        <h1 className={cn(pageTitle, "hidden shrink-0 lg:block")}>Pixel By Day</h1>
+
+        <div
           className={cn(
-            "order-2 flex min-h-0 w-full flex-1 flex-col gap-4 overflow-x-hidden overflow-y-auto border-none bg-transparent p-4 pb-[max(1.5rem,env(safe-area-inset-bottom))] lg:order-1 lg:h-full lg:w-80 lg:flex-none lg:shrink-0 lg:gap-6 lg:overflow-y-auto lg:p-6 lg:pb-8",
-            "[&>*:not(h1):not(p)]:transition-opacity [&>*:not(h1):not(p)]:duration-300",
-            previewing &&
-              "[&>*:not(h1):not(p)]:pointer-events-none [&>*:not(h1):not(p)]:opacity-30"
+            "flex flex-col gap-4 transition-opacity duration-300 lg:gap-6",
+            previewing && "opacity-30"
           )}
+          inert={previewing ? true : undefined}
         >
         <input
           ref={fileInputRef}
           type="file"
           accept="image/jpeg,image/png,image/webp,image/gif"
+          aria-label="Upload image"
           className="hidden"
           onChange={handleFileChange}
         />
-        <h1 className={cn(pageTitle, "hidden shrink-0 lg:block")}>Pixel By Day</h1>
 
         <RepeatSection
           passes={passes}
@@ -1304,6 +1376,7 @@ export default function Home() {
           textureOpacity={textureOpacity}
           setTextureOpacity={setTextureOpacity}
         />
+        </div>
         <p className={cn("px-1 pb-2 text-center text-slate-600 lg:hidden", footerText)}>
           Designed and created by{" "}
           <a
@@ -1366,10 +1439,10 @@ export default function Home() {
             handleCapture={handleCapture}
             isPlaying={isPlaying}
             togglePlaying={togglePlaying}
-            livePlayMode={livePlayMode}
-            setLivePlayMode={handleLivePlayModeChange}
             livePlaySpeed={livePlaySpeed}
             setLivePlaySpeed={handleLivePlaySpeedChange}
+            speedRamp={speedRamp}
+            setSpeedRamp={setSpeedRamp}
           />
         </div>
       </main>
@@ -1381,6 +1454,7 @@ export default function Home() {
           scrollHistory={scrollHistory}
           openPreview={openPreview}
           handleDeleteHistory={handleDeleteHistory}
+          handleClearAllHistory={handleClearAllHistory}
         />
       )}
       </div>

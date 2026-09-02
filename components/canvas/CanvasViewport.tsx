@@ -54,6 +54,7 @@ export function CanvasViewport({
       ) : (
         <button
           type="button"
+          aria-label="Upload image"
           onClick={() => fileInputRef.current?.click()}
           onDragOver={handleDragOver}
           onDragEnter={handleDragEnter}
@@ -87,6 +88,9 @@ export function CanvasViewport({
            what makes the preview land on exactly the canvas's box — not double-inset.
            Restore/Cancel live down in the toolbar, leaving the image full size here. */
         <div
+          role="dialog"
+          aria-modal="true"
+          aria-label="Saved result preview"
           className="absolute inset-0 z-40 flex items-center justify-center bg-[#08080a] p-2 sm:p-4 md:p-6"
           onClick={cancelPreview}
         >

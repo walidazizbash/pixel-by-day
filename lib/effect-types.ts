@@ -1,4 +1,5 @@
 import type { SubdivisionMode } from "@/lib/layout-types"
+import type { SpeedRampPoint } from "@/lib/speed-ramp"
 
 export type {
   CachedCell,
@@ -6,6 +7,7 @@ export type {
   LayoutParams,
   SubdivisionMode,
 } from "@/lib/layout-types"
+export type { SpeedRampPoint } from "@/lib/speed-ramp"
 
 /**
  * Cell assignment names. Color vs texture routing lives in `lib/pipeline.ts`.
@@ -128,20 +130,6 @@ export type EffectSettings = {
   slitScanLuminanceMask: boolean
 }
 
-/**
- * How Live Play animates. The Cell grid is static in both, and in both the pixels
- * inside each Cell scroll downward and wrap at that Cell's own borders. What
- * differs is what the smear is pinned to, which is what makes them read so
- * differently on screen.
- *
- *   fixed    the smear wraps with the Cell's contents, so it commutes with the
- *            scroll: the smeared Cell simply slides, seamless and calm
- *   dynamic  the smear holds at the Cell's edges, pinned to the Cell rather than
- *            to its contents, so it re-forms every frame as pixels scroll
- *            through — the effects visibly redraw and churn
- */
-export type LivePlayMode = "fixed" | "dynamic"
-
 /** Settings subset consumed by the Phase 3 composite worker. */
 export type CompositeTextureSettings = {
   textureEnabled: boolean
@@ -157,21 +145,23 @@ export type EffectWorkerInMessage =
       jobId: number
       settings: EffectSettings
       /**
-       * Live Play travel for this frame, in pixels of downward motion. What it
-       * moves depends on `livePlayMode`. Absent / 0 is the static frame.
+       * Live Play travel for this frame, in pixels of downward motion inside
+       * each Cell. Absent / 0 is the static frame.
        * Deliberately not part of `EffectSettings`: it changes every frame and
        * must never touch `LayoutParams` or `SlitScanParams`.
        */
       offsetY?: number
-      /** Which Live Play behavior `offsetY` drives. Absent means `fixed`. */
-      livePlayMode?: LivePlayMode
       /**
-       * True only for frames posted by the Live Play animation loop. It gates
-       * the worker's Fixed-mode Cell cache: any other render drops that cache
-       * and recomputes, so nothing a settings change touched can survive into
-       * the next frame. Absent means a normal, settings-driven render.
+       * Per-Cell multiplier curve on `offsetY` — see `lib/speed-ramp.ts`. Each
+       * Cell's fixed position along the ramp's X axis picks its Y multiplier,
+       * evaluated by `evaluateSpeedRamp` in the effect worker. Absent / invalid
+       * falls back to `DEFAULT_SPEED_RAMP` via `sanitizeSpeedRamp` (a linear
+       * 0×→1× curve, not a flat 1×). Sibling of
+       * `offsetY`, not `EffectSettings`, for the same reason: it only has an
+       * effect once `offsetY` is nonzero, so it must never invalidate a static
+       * render.
        */
-      live?: boolean
+      speedRamp?: SpeedRampPoint[]
     }
 
 export type EffectWorkerOutMessage =

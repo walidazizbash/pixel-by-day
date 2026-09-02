@@ -46,3 +46,14 @@ export function getSiteUrl(): string {
 
   return "https://pixelbyday.com"
 }
+
+/**
+ * Whether search engines should index this deployment.
+ * Vercel preview / development hosts must stay noindex so they do not compete
+ * with production. Unset `VERCEL_ENV` (local / non-Vercel prod builds) indexes.
+ */
+export function isSearchIndexable(): boolean {
+  const vercelEnv = process.env.VERCEL_ENV
+  if (vercelEnv === "preview" || vercelEnv === "development") return false
+  return true
+}

@@ -38,9 +38,8 @@ export const SMEAR_WEIGHT_DEFAULTS = {
  *
  * UI-only, like the smear defaults above — it paces the animation loop and never
  * reaches `EffectSettings`, so it cannot touch the worker's caches. A small range
- * is enough now that the Fixed-mode Cell cache keeps playback at frame rate: at
- * 60fps this spans 60–240 px/s, and a step past 4 reads as a jump rather than a
- * scroll.
+ * keeps playback readable: at 60fps this spans 60–240 px/s, and a step past 4
+ * reads as a jump rather than a scroll.
  *
  * Continuous, not integral. The offset it feeds is a float that the worker floors
  * per Cell, so a fractional speed simply advances the scroll on some frames and

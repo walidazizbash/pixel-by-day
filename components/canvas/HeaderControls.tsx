@@ -1,15 +1,30 @@
 "use client"
 
-import type { Dispatch, RefObject, SetStateAction } from "react"
-import { ChevronLeft, ChevronRight, Pause, Play } from "lucide-react"
-import type { EffectSettings, LivePlayMode } from "@/lib/effect-types"
+import { useEffect, useRef, useState } from "react"
+import type {
+  ComponentProps,
+  Dispatch,
+  PointerEvent as ReactPointerEvent,
+  RefObject,
+  SetStateAction,
+} from "react"
+import { ChevronLeft, ChevronRight, Pause, Play, Spline } from "lucide-react"
+import type { EffectSettings, SpeedRampPoint } from "@/lib/effect-types"
 import { Button } from "@/components/ui/button"
 import { LIVE_PLAY_SPEED } from "@/components/controls/defaults"
+import { SpeedRampCurve } from "@/components/controls/SpeedRampCurve"
 import {
   sliderValueReadout,
   toolbarActionButton,
 } from "@/components/controls/styles"
 import { cn } from "@/lib/utils"
+
+/** Same touch-scroll lock as `components/ui/slider.tsx` — React pointer events are non-passive. */
+function preventTouchScroll(event: ReactPointerEvent<HTMLElement>) {
+  if (event.pointerType === "touch") {
+    event.preventDefault()
+  }
+}
 
 type HeaderControlsProps = {
   previewing: boolean
@@ -30,37 +45,50 @@ type HeaderControlsProps = {
   isBaking: boolean
   resetGenerationParameters: () => void
   handleCapture: () => void
-  /** Live Play state — the animation toggle and which behavior it runs. */
+  /** Live Play state — the animation toggle. */
   isPlaying: boolean
   togglePlaying: () => void
-  livePlayMode: LivePlayMode
-  setLivePlayMode: (mode: LivePlayMode) => void
   /** Pixels of scroll per rendered frame. */
   livePlaySpeed: number
   setLivePlaySpeed: (speed: number) => void
+  /** Per-Cell speed curve — see `components/controls/SpeedRampCurve.tsx`. */
+  speedRamp: SpeedRampPoint[]
+  setSpeedRamp: Dispatch<SetStateAction<SpeedRampPoint[]>>
 }
 
-const LIVE_PLAY_MODES: Array<{
-  value: LivePlayMode
-  label: string
-  title: string
-}> = [
-  {
-    value: "fixed",
-    label: "Fixed",
-    title: "Fixed: the pixels scroll and the smear slides with them, seamlessly",
-  },
-  {
-    value: "dynamic",
-    label: "Dynamic",
-    title: "Dynamic: the pixels scroll while the effects re-form every frame",
-  },
-]
+/**
+ * Play / Load / Bake / Reset / Capture / Save share one outer width: the word
+ * "Capture" (the longest label) plus `toolbarActionButton`'s padding, which
+ * already steps down on small screens. An invisible "Capture" holds the width
+ * in-flow; the real label is overlaid and centered so shorter words don't
+ * shrink the pill and Capture never overflows it.
+ */
+function EqualToolbarButton({
+  children,
+  className,
+  ...props
+}: ComponentProps<typeof Button>) {
+  return (
+    <Button
+      size="sm"
+      className={cn(toolbarActionButton, "relative overflow-hidden", className)}
+      {...props}
+    >
+      <span className="invisible select-none" aria-hidden="true">
+        Capture
+      </span>
+      <span className="absolute inset-0 flex items-center justify-center gap-1 whitespace-nowrap">
+        {children}
+      </span>
+    </Button>
+  )
+}
 
 /**
- * The action bar under the canvas: Seed, Random with its undo/redo arrows, Live Play
- * with its motion toggle and speed, Upload, Save, Bake, Reset and Capture — plus the
- * Restore/Cancel pair that covers them all while a History snapshot is previewed.
+ * The action bar under the canvas: Seed and Random on the first row, Live Play
+ * (play, speed) on the next, then Upload, Save, Bake, Reset and Capture — plus
+ * the Restore/Cancel pair that covers them all while a History snapshot is
+ * previewed.
  */
 export function HeaderControls({
   previewing,
@@ -83,16 +111,44 @@ export function HeaderControls({
   handleCapture,
   isPlaying,
   togglePlaying,
-  livePlayMode,
-  setLivePlayMode,
   livePlaySpeed,
   setLivePlaySpeed,
+  speedRamp,
+  setSpeedRamp,
 }: HeaderControlsProps) {
   /** Filled fraction of the speed track, mirroring the Slider's Indicator. */
   const speedPercent =
     ((livePlaySpeed - LIVE_PLAY_SPEED.min) /
       (LIVE_PLAY_SPEED.max - LIVE_PLAY_SPEED.min)) *
     100
+  const [rampOpen, setRampOpen] = useState(false)
+  const rampContainerRef = useRef<HTMLDivElement>(null)
+
+  /**
+   * Click-outside / Escape to close, via a document listener rather than a
+   * full-viewport backdrop element: this toolbar sits inside a
+   * `backdrop-blur` card, and `backdrop-filter` establishes a containing
+   * block for `position: fixed` descendants — a `fixed inset-0` backdrop
+   * nested in here only covers that card's box, not the sidebar, so it
+   * can never actually catch a click there. A listener has no such limit.
+   */
+  useEffect(() => {
+    if (!rampOpen) return
+    function handlePointerDown(event: PointerEvent) {
+      if (!rampContainerRef.current?.contains(event.target as Node)) {
+        setRampOpen(false)
+      }
+    }
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") setRampOpen(false)
+    }
+    document.addEventListener("pointerdown", handlePointerDown)
+    document.addEventListener("keydown", handleKeyDown)
+    return () => {
+      document.removeEventListener("pointerdown", handlePointerDown)
+      document.removeEventListener("keydown", handleKeyDown)
+    }
+  }, [rampOpen])
 
   return (
     <div className="relative flex shrink-0 flex-col items-center gap-2 border-t border-white/10 px-3 py-2 md:gap-3 md:px-6 md:py-4">
@@ -121,10 +177,12 @@ export function HeaderControls({
       )}
       <div
         className={cn(
-          "flex min-w-0 flex-wrap items-center justify-center gap-1.5 md:gap-3",
+          "flex min-w-0 flex-col items-center gap-1.5 md:gap-3",
           previewing && "invisible"
         )}
+        inert={previewing ? true : undefined}
       >
+        <div className="flex min-w-0 flex-wrap items-center justify-center gap-1.5 md:gap-3">
         <div className="flex min-w-0 max-w-[12rem] items-center gap-1.5 md:max-w-[12rem]">
           <label
             htmlFor="canvas-seed"
@@ -216,8 +274,10 @@ export function HeaderControls({
             />
           </button>
         </div>
+        </div>
 
-        <button
+        <div className="flex min-w-0 flex-wrap items-center justify-center gap-1.5 md:gap-3">
+        <EqualToolbarButton
           type="button"
           aria-label={isPlaying ? "Pause Live Play" : "Start Live Play"}
           aria-pressed={isPlaying}
@@ -228,47 +288,14 @@ export function HeaderControls({
           }
           disabled={!imageSrc}
           onClick={togglePlaying}
-          className={cn(
-            "inline-flex h-8 shrink-0 items-center gap-1.5 rounded-lg border border-white/10 px-2.5 text-sm font-medium transition-colors disabled:pointer-events-none disabled:opacity-35 md:px-3",
-            isPlaying
-              ? "bg-white/10 text-slate-100"
-              : "bg-transparent text-slate-300 hover:text-slate-100"
-          )}
         >
           {isPlaying ? (
-            <Pause className="size-4" strokeWidth={2} />
+            <Pause className="size-3.5" strokeWidth={2} />
           ) : (
-            <Play className="size-4" strokeWidth={2} />
+            <Play className="size-3.5" strokeWidth={2} />
           )}
           {isPlaying ? "Pause" : "Play"}
-        </button>
-
-        {/* Segmented control: which motion Live Play runs. Switching repaints at
-            the offset already on screen, so it swaps without jumping. */}
-        <div
-          role="group"
-          aria-label="Live Play motion"
-          className="flex h-8 shrink-0 items-center rounded-lg border border-white/10 p-0.5"
-        >
-          {LIVE_PLAY_MODES.map((option) => (
-            <button
-              key={option.value}
-              type="button"
-              aria-pressed={livePlayMode === option.value}
-              title={option.title}
-              disabled={!imageSrc}
-              onClick={() => setLivePlayMode(option.value)}
-              className={cn(
-                "inline-flex h-full items-center rounded-md px-2.5 text-xs font-medium transition-colors disabled:pointer-events-none disabled:opacity-35",
-                livePlayMode === option.value
-                  ? "bg-white/10 text-slate-100"
-                  : "text-slate-400 hover:text-slate-200"
-              )}
-            >
-              {option.label}
-            </button>
-          ))}
-        </div>
+        </EqualToolbarButton>
 
         {/* Speed.
 
@@ -290,8 +317,10 @@ export function HeaderControls({
             Not gated on `imageSrc` either: it is a playback preference, not an
             image operation, and disabled opacity also made it look inert. */}
         <div
-          className="flex h-8 shrink-0 items-center gap-2.5 rounded-lg border border-white/10 px-3"
+          className="flex h-8 shrink-0 touch-none items-center gap-2.5 rounded-lg border border-white/10 px-3"
           title="Live Play speed — pixels of scroll per rendered frame"
+          style={{ touchAction: "none" }}
+          onPointerDown={preventTouchScroll}
         >
           <span className="shrink-0 text-xs font-medium text-slate-400">
             Speed
@@ -306,7 +335,9 @@ export function HeaderControls({
             onChange={(event) =>
               setLivePlaySpeed(Number.parseFloat(event.currentTarget.value))
             }
+            onPointerDown={preventTouchScroll}
             style={{
+              touchAction: "none",
               backgroundImage:
                 "linear-gradient(to right, var(--color-slate-500), var(--color-slate-300), var(--color-slate-200))," +
                 "linear-gradient(to right, color-mix(in oklab, var(--color-slate-700) 50%, transparent), color-mix(in oklab, var(--color-slate-700) 50%, transparent))",
@@ -315,7 +346,7 @@ export function HeaderControls({
               backgroundRepeat: "no-repeat",
             }}
             className={cn(
-              "h-3.5 w-24 min-w-0 cursor-pointer appearance-none bg-transparent outline-none md:w-28",
+              "h-3.5 w-24 min-w-0 touch-none cursor-pointer appearance-none bg-transparent outline-none md:w-28",
               "[&::-webkit-slider-runnable-track]:h-3.5 [&::-webkit-slider-runnable-track]:bg-transparent",
               "[&::-webkit-slider-thumb]:size-3.5 [&::-webkit-slider-thumb]:cursor-pointer [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:border-0 [&::-webkit-slider-thumb]:bg-[linear-gradient(to_bottom,var(--color-slate-300),var(--color-slate-400),var(--color-slate-500))] [&::-webkit-slider-thumb]:transition-shadow",
               "[&:hover::-webkit-slider-thumb]:shadow-[0_0_12px_rgba(255,255,255,0.25)] [&:focus-visible::-webkit-slider-thumb]:shadow-[0_0_0_2px_rgba(255,255,255,0.35)]",
@@ -327,6 +358,41 @@ export function HeaderControls({
             {livePlaySpeed.toFixed(1)}
           </span>
         </div>
+
+        {/* Speed Ramp toggle, right next to Speed — the curve editor itself needs far
+            more room than this toolbar strip has, so it opens as a popover anchored
+            here instead of sitting inline. Closes on an outside click or Escape via
+            the document listener above, not a backdrop element — see that comment. */}
+        <div className="relative" ref={rampContainerRef}>
+          <button
+            type="button"
+            aria-label={rampOpen ? "Close speed ramp editor" : "Open speed ramp editor"}
+            aria-expanded={rampOpen}
+            title="Speed ramp — shape how Live Play speed varies across Cells"
+            onClick={() => setRampOpen((prev) => !prev)}
+            className={cn(
+              "inline-flex size-8 shrink-0 items-center justify-center rounded-lg border border-white/10 text-slate-300 transition-colors hover:text-slate-100",
+              rampOpen ? "bg-white/10 text-slate-100" : "bg-transparent"
+            )}
+          >
+            <Spline className="size-4" strokeWidth={2} aria-hidden />
+          </button>
+
+          {rampOpen && (
+            <div
+              className="absolute bottom-full right-0 z-40 mb-2 w-72 touch-none rounded-2xl border border-white/10 bg-slate-900/95 px-4 py-3 text-[#f5f5f7] shadow-[0_16px_48px_rgba(0,0,0,0.65)] backdrop-blur-xl"
+              style={{ touchAction: "none" }}
+              onPointerDown={preventTouchScroll}
+            >
+              <SpeedRampCurve
+                title="Speed Ramp"
+                speedRamp={speedRamp}
+                setSpeedRamp={setSpeedRamp}
+              />
+            </div>
+          )}
+        </div>
+        </div>
       </div>
 
       <div
@@ -334,11 +400,10 @@ export function HeaderControls({
           "hide-scrollbar flex w-full max-w-full flex-row flex-nowrap items-center justify-center-safe gap-1 overflow-x-auto transition-opacity duration-300 lg:max-w-none lg:gap-3 lg:overflow-visible lg:flex-wrap lg:justify-center",
           previewing && "invisible"
         )}
+        inert={previewing ? true : undefined}
       >
-          <Button
+          <EqualToolbarButton
             type="button"
-            size="sm"
-            className={toolbarActionButton}
             onClick={() => {
               if (fileInputRef.current) {
                 fileInputRef.current.value = ""
@@ -347,45 +412,37 @@ export function HeaderControls({
             }}
           >
             Load
-          </Button>
-          <Button
+          </EqualToolbarButton>
+          <EqualToolbarButton
             type="button"
-            size="sm"
-            className={toolbarActionButton}
             disabled={!imageSrc || isBaking}
             title="Bake the current output as the next input image"
             onClick={handleBakeClick}
           >
             Bake
-          </Button>
-          <Button
+          </EqualToolbarButton>
+          <EqualToolbarButton
             type="button"
-            size="sm"
-            className={toolbarActionButton}
             disabled={!imageSrc}
             title="Zero effects and smears; restore Cell Pattern and Noise Mask defaults (keeps grain)"
             onClick={resetGenerationParameters}
           >
             Reset
-          </Button>
-          <Button
+          </EqualToolbarButton>
+          <EqualToolbarButton
             type="button"
-            size="sm"
-            className={toolbarActionButton}
             disabled={!imageSrc}
             title="Save a thumbnail of this result to History"
             onClick={handleCapture}
           >
             Capture
-          </Button>
-          <Button
-            size="sm"
-            className={toolbarActionButton}
+          </EqualToolbarButton>
+          <EqualToolbarButton
             disabled={!imageSrc || isExportingPng}
             onClick={exportHighResImage}
           >
             Save
-          </Button>
+          </EqualToolbarButton>
       </div>
     </div>
   )

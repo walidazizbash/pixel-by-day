@@ -6,9 +6,10 @@ import type {
   CompositeWorkerOutMessage,
   EffectSettings,
   EffectWorkerOutMessage,
-  LivePlayMode,
+  SpeedRampPoint,
 } from "@/lib/effect-types"
 import { MAX_DECODE_EDGE, MAX_DECODE_PIXELS } from "@/lib/constants"
+import { DEFAULT_SPEED_RAMP } from "@/lib/speed-ramp"
 
 /** Max edge length for interactive preview / Phase 2+3 worker buffers. */
 const MAX_PREVIEW_DIMENSION = 1200
@@ -89,6 +90,14 @@ type UseAppWorkersOptions = {
    * reconciled with exactly one job.
    */
   paused?: boolean
+  /**
+   * Per-Cell Live Play speed curve (see `lib/speed-ramp.ts`). Sibling of the
+   * offset passed to `renderLiveFrame` / `setLiveOffsetY`, not part of
+   * `settings` — it only has an effect once that offset is nonzero, so it must
+   * never trigger the settings-driven regen effect. Read fresh at dispatch
+   * time, same as the offset.
+   */
+  speedRamp?: readonly SpeedRampPoint[]
   /** Draw a finished composite frame to the live canvas. */
   onPreviewFrame: (width: number, height: number, bitmap: ImageBitmap) => void
   /** Draw the raw source while the first worker job is pending. */
@@ -104,9 +113,9 @@ type UseAppWorkersResult = {
    */
   capturePhase2PngBlob: () => Promise<Blob | null>
   /**
-   * Live Play: try to post one frame at the given offset and mode, straight past
-   * React. The caller drives this from a `requestAnimationFrame` loop with the
-   * offset in a ref — routing it through `setState` would re-render the whole
+   * Live Play: try to post one frame at the given offset, straight past React.
+   * The caller drives this from a `requestAnimationFrame` loop with the offset
+   * in a ref — routing it through `setState` would re-render the whole
    * unmemoized control tree every frame.
    *
    * Returns whether the frame was actually dispatched. A dropped frame commits
@@ -114,22 +123,28 @@ type UseAppWorkersResult = {
    * offset has to stay equal to the one on screen, or the next settings-driven
    * render would jump the pixels forward by every tick that was skipped.
    */
-  renderLiveFrame: (offsetY: number, mode: LivePlayMode) => boolean
+  renderLiveFrame: (offsetY: number) => boolean
   /**
-   * Switch which Live Play behavior renders, at the offset already on screen.
-   *
-   * Unlike a frame, a mode change may never be dropped — nothing would come
-   * along to retry it while paused — so it commits immediately and goes out
-   * through the same queued path as a slider, which coalesces and waits behind a
-   * busy worker. The offset is untouched, so the swap does not jump.
+   * Overwrite the offset the *next* render dispatch will use, without dispatching
+   * one itself. For History Restore: the caller sets this to the snapshot's
+   * captured offset, then the settings-driven effect's own `paused` transition
+   * (already forced by closing the modal) renders at that offset instead of
+   * wherever Live Play happened to be when the preview was opened.
    */
-  applyLivePlayMode: (mode: LivePlayMode) => void
+  setLiveOffsetY: (offsetY: number) => void
+  /**
+   * Offset of the last frame whose pixels were drawn to the live canvas.
+   * History Capture must use this — not the Live Play loop's dispatch cursor —
+   * so Restore regenerates the frame that was actually on screen.
+   */
+  getPaintedLiveOffsetY: () => number
 }
 
 export function useAppWorkers({
   settings,
   imageSrc,
   paused = false,
+  speedRamp = DEFAULT_SPEED_RAMP,
   onPreviewFrame,
   onSourcePreview,
 }: UseAppWorkersOptions): UseAppWorkersResult {
@@ -172,8 +187,16 @@ export function useAppWorkers({
    * the canvas is already showing.
    */
   const liveOffsetYRef = useRef(0)
-  /** Live Play behavior the offset drives. Same deal: every dispatch reads it. */
-  const liveModeRef = useRef<LivePlayMode>("fixed")
+  /**
+   * Offset of the last frame whose pixels were drawn to the live canvas.
+   * Capture reads this so a History snapshot matches the painted frame, not a
+   * newer offset that was only dispatched and is still in flight.
+   */
+  const paintedOffsetYRef = useRef(0)
+  /** jobId → offsetY for in-flight renders, so a painted result can recover it. */
+  const jobOffsetByIdRef = useRef(new Map<number, number>())
+  /** Mirrors the `speedRamp` prop for the same reason as `settingsRef`: read fresh at dispatch time, not captured in a stale closure. */
+  const speedRampRef = useRef(speedRamp)
 
   const settingsRef = useRef(settings)
   const onPreviewFrameRef = useRef(onPreviewFrame)
@@ -181,19 +204,43 @@ export function useAppWorkers({
 
   useEffect(() => {
     settingsRef.current = settings
+    speedRampRef.current = speedRamp
     onPreviewFrameRef.current = onPreviewFrame
     onSourcePreviewRef.current = onSourcePreview
-  }, [settings, onPreviewFrame, onSourcePreview])
+  }, [settings, speedRamp, onPreviewFrame, onSourcePreview])
 
-  function applyWorkerResult(
-    width: number,
-    height: number,
-    bitmap: ImageBitmap
-  ) {
-    releaseBitmap(compositeBitmapRef.current)
-    compositeBitmapRef.current = bitmap
-    onPreviewFrameRef.current(width, height, bitmap)
-  }
+  const rememberJobOffset = useCallback((jobId: number, offsetY: number) => {
+    const map = jobOffsetByIdRef.current
+    map.set(jobId, offsetY)
+    if (map.size > 64) {
+      const minKeep = jobId - 32
+      for (const key of map.keys()) {
+        if (key < minKeep) map.delete(key)
+      }
+    }
+  }, [])
+
+  const markPaintedOffset = useCallback((jobId: number) => {
+    const offset = jobOffsetByIdRef.current.get(jobId)
+    if (offset === undefined) return
+    paintedOffsetYRef.current = offset
+    jobOffsetByIdRef.current.delete(jobId)
+  }, [])
+
+  const applyWorkerResult = useCallback(
+    (
+      width: number,
+      height: number,
+      bitmap: ImageBitmap,
+      jobId?: number
+    ) => {
+      releaseBitmap(compositeBitmapRef.current)
+      compositeBitmapRef.current = bitmap
+      if (jobId !== undefined) markPaintedOffset(jobId)
+      onPreviewFrameRef.current(width, height, bitmap)
+    },
+    [markPaintedOffset]
+  )
 
   const dispatchComposite = useCallback(
     (jobId: number, phase2: ImageBitmap, effectSettings: EffectSettings) => {
@@ -248,10 +295,26 @@ export function useAppWorkers({
     pendingCompositeRef.current = null
 
     if (!settingsRef.current.textureEnabled) {
+      // Same watermark discipline as handlePhase2Result's texture-off path: a
+      // pending Phase 2 must not repaint after a newer clean apply, and applying
+      // it must retire older in-flight composites so they cannot flash grain back.
+      if (pending.jobId < lastShownCompositeJobIdRef.current) {
+        pending.phase2.close()
+        return
+      }
+      lastShownCompositeJobIdRef.current = Math.max(
+        lastShownCompositeJobIdRef.current,
+        pending.jobId
+      )
+      lastPostedCompositeJobIdRef.current = Math.max(
+        lastPostedCompositeJobIdRef.current,
+        pending.jobId
+      )
       applyWorkerResult(
         pending.phase2.width,
         pending.phase2.height,
-        pending.phase2
+        pending.phase2,
+        pending.jobId
       )
       return
     }
@@ -260,7 +323,7 @@ export function useAppWorkers({
       return
     }
     dispatchComposite(pending.jobId, pending.phase2, pending.settings)
-  }, [dispatchComposite])
+  }, [applyWorkerResult, dispatchComposite])
 
   const handlePhase2Result = useCallback(
     async (
@@ -277,6 +340,7 @@ export function useAppWorkers({
       // Grain stays on the live canvas until the next Phase 3 frame lands.
       // Painting Phase 2 here is what flickered the overlay off mid-drag.
       if (!settingsRef.current.textureEnabled) {
+        markPaintedOffset(jobId)
         onPreviewFrameRef.current(width, height, bitmap)
       }
 
@@ -296,7 +360,13 @@ export function useAppWorkers({
         clone.close()
       }
 
+      // Stale Phase 2 must never enqueue grain: a newer texture-off job may already
+      // have painted, and a late composite with an older jobId would flash grain back.
       if (settingsRef.current.textureEnabled) {
+        if (!stillCurrent) {
+          bitmap.close()
+          return
+        }
         enqueueComposite(jobId, bitmap, settingsRef.current)
         return
       }
@@ -306,13 +376,22 @@ export function useAppWorkers({
         return
       }
 
+      // Texture-off applies count as "shown" so a late lower-id composite cannot win.
+      lastShownCompositeJobIdRef.current = Math.max(
+        lastShownCompositeJobIdRef.current,
+        jobId
+      )
+      lastPostedCompositeJobIdRef.current = Math.max(
+        lastPostedCompositeJobIdRef.current,
+        jobId
+      )
       releaseBitmap(compositeBitmapRef.current)
       compositeBitmapRef.current = bitmap
     },
-    [enqueueComposite]
+    [enqueueComposite, markPaintedOffset]
   )
 
-  const dispatchWorkerRender = useCallback((live = false) => {
+  const dispatchWorkerRender = useCallback(() => {
     const worker = workerRef.current
     const source = sourceBitmapRef.current
     const effectSettings = settingsRef.current
@@ -322,16 +401,17 @@ export function useAppWorkers({
     }
 
     const jobId = ++jobIdRef.current
+    const offsetY = liveOffsetYRef.current
+    rememberJobOffset(jobId, offsetY)
     effectBusyRef.current = true
     worker.postMessage({
       type: "render",
       jobId,
       settings: { ...effectSettings },
-      offsetY: liveOffsetYRef.current,
-      livePlayMode: liveModeRef.current,
-      live,
+      offsetY,
+      speedRamp: speedRampRef.current,
     })
-  }, [])
+  }, [rememberJobOffset])
 
   const flushPendingRegen = useCallback(() => {
     effectBusyRef.current = false
@@ -376,11 +456,22 @@ export function useAppWorkers({
     phase3RafRef.current = requestAnimationFrame(() => {
       phase3RafRef.current = null
       if (!pendingPhase3Ref.current) return
-      pendingPhase3Ref.current = false
+
+      // A Live Play frame or settings regen may have started since we scheduled.
+      // Abort rather than steal their jobId and flash a stale Phase 2 under grain.
+      if (
+        effectBusyRef.current ||
+        pendingRegenRef.current ||
+        pendingDispatchRef.current
+      ) {
+        pendingPhase3Ref.current = false
+        return
+      }
 
       const effectSettings = settingsRef.current
       const phase2 = phase2BitmapRef.current
       if (!effectSettings || !phase2 || !compositeWorkerRef.current) {
+        pendingPhase3Ref.current = false
         scheduleRegen()
         return
       }
@@ -394,6 +485,15 @@ export function useAppWorkers({
             return
           }
           if (!effectSettings.textureEnabled) {
+            lastShownCompositeJobIdRef.current = Math.max(
+              lastShownCompositeJobIdRef.current,
+              jobId
+            )
+            lastPostedCompositeJobIdRef.current = Math.max(
+              lastPostedCompositeJobIdRef.current,
+              jobId
+            )
+            // Phase-3-only re-applies the retained Phase 2 — scroll position unchanged.
             applyWorkerResult(clone.width, clone.height, clone)
             return
           }
@@ -401,13 +501,15 @@ export function useAppWorkers({
         } catch (err) {
           console.error("[pixel-by-day] Phase 3 refresh failed", err)
           scheduleRegen()
+        } finally {
+          pendingPhase3Ref.current = false
         }
       })()
     })
-  }, [enqueueComposite, scheduleRegen])
+  }, [applyWorkerResult, enqueueComposite, scheduleRegen])
 
   const renderLiveFrame = useCallback(
-    (offsetY: number, mode: LivePlayMode) => {
+    (offsetY: number) => {
       if (!workerRef.current || !sourceBitmapRef.current) return false
       // The worker paces the loop. A frame that arrives while it is still busy is
       // dropped rather than queued, so playback degrades to a lower frame rate
@@ -416,27 +518,29 @@ export function useAppWorkers({
       // A settings-driven regen is already queued for this frame; it renders at
       // the committed offset, which is what the canvas is already showing.
       if (pendingDispatchRef.current) return false
+      // Grain-only refresh owns the next jobId until it posts or aborts — do not
+      // interleave a Live Play dispatch or the painted frame can flash un-grained.
+      if (pendingPhase3Ref.current) return false
 
       // Commit only now that the frame is going out. Storing a dropped tick's
       // offset is what made a paused canvas jump on the next slider move: the
       // ref had run ahead of the last frame anyone actually saw.
       liveOffsetYRef.current = offsetY
-      liveModeRef.current = mode
-      // The only path that may use the worker's Fixed-mode Cell cache: every
-      // other dispatch is settings-driven and must rebuild from scratch.
-      dispatchWorkerRender(true)
+      dispatchWorkerRender()
       return true
     },
     [dispatchWorkerRender]
   )
 
-  const applyLivePlayMode = useCallback(
-    (mode: LivePlayMode) => {
-      if (liveModeRef.current === mode) return
-      liveModeRef.current = mode
-      scheduleRegen()
-    },
-    [scheduleRegen]
+  const setLiveOffsetY = useCallback((offsetY: number) => {
+    liveOffsetYRef.current = offsetY
+    paintedOffsetYRef.current = offsetY
+  }, [])
+
+  /** Offset of the pixels currently on the live canvas (for History Capture). */
+  const getPaintedLiveOffsetY = useCallback(
+    () => paintedOffsetYRef.current,
+    []
   )
 
   const exportHighResImage = useCallback(() => {
@@ -550,7 +654,7 @@ export function useAppWorkers({
           msg.bitmap.close()
         } else {
           lastShownCompositeJobIdRef.current = msg.jobId
-          applyWorkerResult(msg.width, msg.height, msg.bitmap)
+          applyWorkerResult(msg.width, msg.height, msg.bitmap, msg.jobId)
         }
         flushPendingComposite()
         return
@@ -575,6 +679,11 @@ export function useAppWorkers({
         cancelAnimationFrame(phase3RafRef.current)
         phase3RafRef.current = null
       }
+      const pendingComposite = pendingCompositeRef.current
+      if (pendingComposite) {
+        pendingComposite.phase2.close()
+        pendingCompositeRef.current = null
+      }
       worker.terminate()
       workerRef.current = null
       compositeWorker.terminate()
@@ -588,7 +697,7 @@ export function useAppWorkers({
       releaseBitmap(fullSourceBitmapRef.current)
       fullSourceBitmapRef.current = null
     }
-  }, [dispatchComposite, handlePhase2Result, flushPendingRegen, flushPendingComposite])
+  }, [applyWorkerResult, dispatchComposite, handlePhase2Result, flushPendingRegen, flushPendingComposite])
 
   /**
    * Phase 1+2 render on any settings change.
@@ -644,6 +753,21 @@ export function useAppWorkers({
   ])
 
   /**
+   * Speed ramp is intentionally not in the Phase-1+2 dependency list above: at
+   * `offsetY === 0` it cannot change pixels, so dragging the curve must not spend
+   * a full regen. Once something is scrolled on screen (Live Play stopped mid-
+   * scroll, or a restored History offset after the preview modal closes —
+   * `paused` here is History preview, not Live Play), force one job so the
+   * canvas tracks the curve.
+   */
+  useEffect(() => {
+    if (!sourceBitmapRef.current || !workerRef.current) return
+    if (paused) return
+    if (liveOffsetYRef.current === 0) return
+    scheduleRegen()
+  }, [paused, speedRamp, scheduleRegen])
+
+  /**
    * Grain-only refresh, reusing the retained Phase 2 frame. Declared after the render
    * effect on purpose — see the ordering note there.
    */
@@ -667,6 +791,14 @@ export function useAppWorkers({
       lastShownCompositeJobIdRef.current = jobIdRef.current
       pendingRegenRef.current = false
       effectBusyRef.current = false
+      pendingPhase3Ref.current = false
+      paintedOffsetYRef.current = 0
+      jobOffsetByIdRef.current.clear()
+      const pendingComposite = pendingCompositeRef.current
+      if (pendingComposite) {
+        pendingComposite.phase2.close()
+        pendingCompositeRef.current = null
+      }
       workerRef.current?.postMessage({ type: "clearSource" })
       releaseBitmap(sourceBitmapRef.current)
       sourceBitmapRef.current = null
@@ -768,6 +900,7 @@ export function useAppWorkers({
     exportHighResImage,
     capturePhase2PngBlob,
     renderLiveFrame,
-    applyLivePlayMode,
+    setLiveOffsetY,
+    getPaintedLiveOffsetY,
   }
 }

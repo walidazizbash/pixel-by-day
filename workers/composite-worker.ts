@@ -13,7 +13,7 @@ import type {
 } from "@/lib/effect-types"
 import { sanitizeCompositeTextureSettings } from "@/lib/validate-settings"
 
-const GRAIN_TEXTURE_URL = "/images/35mm_texture.png"
+const GRAIN_TEXTURE_URL = "/images/35mm_texture.webp"
 
 let activeJobId = 0
 

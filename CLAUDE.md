@@ -45,7 +45,7 @@ The four content-derived masters (`original`, `invert`, `surreal`, `thermal`) ar
 
 `slitscan` is the fifth master and the exception: it is a 2D curl-noise warp, it is the only master driven by `EffectSettings`, and `setSource` runs before any settings exist. It is therefore absent from `BaseColorMasters` and attached per render by `withSlitScanMaster`, behind the invalidation seam described below.
 
-**Phase 3 — Grain** (`workers/composite-worker.ts`). Blends `public/images/35mm_texture.png` over the finished Phase 2 frame. Deliberately isolated in its own worker so grain-only changes never re-run Phases 1–2.
+**Phase 3 — Grain** (`workers/composite-worker.ts`). Blends `public/images/35mm_texture.webp` over the finished Phase 2 frame. Deliberately isolated in its own worker so grain-only changes never re-run Phases 1–2.
 
 Phases 1+2 live in the effect worker; Phase 3 must never run there. `settings.passes` (1–3) re-runs Phases 1+2 recursively, each pass feeding its output in as the next pass's source with seed `seed + i` and smear decay `(rate/100)^i`; Phase 3 is applied once, after all passes finish.
 

@@ -5,6 +5,14 @@ import type {
   SmearStyleSettings,
 } from "@/lib/effect-types"
 import type { SubdivisionMode } from "@/lib/layout-types"
+import {
+  DEFAULT_SPEED_RAMP,
+  SPEED_RAMP_X_MAX,
+  SPEED_RAMP_X_MIN,
+  SPEED_RAMP_Y_MAX,
+  SPEED_RAMP_Y_MIN,
+  type SpeedRampPoint,
+} from "@/lib/speed-ramp"
 
 function clampNum(
   value: unknown,
@@ -101,6 +109,34 @@ export function sanitizeEffectSettings(raw: unknown): EffectSettings | null {
     slitScanMode: asSlitScanMode(s.slitScanMode),
     slitScanLuminanceMask: asBool(s.slitScanLuminanceMask, false),
   }
+}
+
+/**
+ * Normalize an untrusted `speedRamp` payload (sibling of `offsetY` on the render
+ * message, never part of `EffectSettings` — see `lib/speed-ramp.ts`). Anything
+ * that isn't at least two finite, in-range points falls back to
+ * `DEFAULT_SPEED_RAMP` (a linear 0×→1× curve), same as a missing/invalid
+ * `offsetY` falls back to 0.
+ */
+export function sanitizeSpeedRamp(raw: unknown): SpeedRampPoint[] {
+  if (!Array.isArray(raw)) return [...DEFAULT_SPEED_RAMP]
+
+  const points: SpeedRampPoint[] = []
+  for (const entry of raw) {
+    if (!entry || typeof entry !== "object") continue
+    const p = entry as Record<string, unknown>
+    const x = typeof p.x === "number" ? p.x : Number(p.x)
+    const y = typeof p.y === "number" ? p.y : Number(p.y)
+    if (!Number.isFinite(x) || !Number.isFinite(y)) continue
+    points.push({
+      x: clampNum(x, SPEED_RAMP_X_MIN, SPEED_RAMP_X_MAX, SPEED_RAMP_X_MIN),
+      y: clampNum(y, SPEED_RAMP_Y_MIN, SPEED_RAMP_Y_MAX, SPEED_RAMP_Y_MIN),
+    })
+  }
+  if (points.length < 2) return [...DEFAULT_SPEED_RAMP]
+
+  points.sort((a, b) => a.x - b.x)
+  return points
 }
 
 /**

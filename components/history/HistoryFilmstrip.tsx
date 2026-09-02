@@ -13,12 +13,14 @@ type HistoryFilmstripProps = {
   scrollHistory: (delta: number) => void
   openPreview: (snapshot: HistorySnapshot) => void
   handleDeleteHistory: (id: string, event: React.MouseEvent) => void
+  handleClearAllHistory: () => void
 }
 
 /**
  * The History rail: captured snapshots as thumbnails, with scroll chevrons, a delete
- * button per item, and click-to-preview. The preview image itself renders over the
- * canvas in CanvasViewport, so it lands on exactly the canvas footprint.
+ * button per item, click-to-preview, and Clear All to free every capture at once.
+ * The preview image itself renders over the canvas in CanvasViewport, so it lands
+ * on exactly the canvas footprint.
  */
 export function HistoryFilmstrip({
   visualHistory,
@@ -26,9 +28,13 @@ export function HistoryFilmstrip({
   scrollHistory,
   openPreview,
   handleDeleteHistory,
+  handleClearAllHistory,
 }: HistoryFilmstripProps) {
   return (
-    <aside className="flex w-full shrink-0 flex-row items-center gap-2 px-3 py-2 lg:h-full lg:w-28 lg:flex-col lg:px-0 lg:py-3 lg:pl-1 lg:pr-3">
+    <aside
+      aria-label="Saved results"
+      className="flex w-full shrink-0 flex-row items-center gap-2 px-3 py-2 lg:h-full lg:w-28 lg:flex-col lg:px-0 lg:py-3 lg:pl-1 lg:pr-3"
+    >
       <button
         type="button"
         aria-label="Scroll history backward"
@@ -81,6 +87,15 @@ export function HistoryFilmstrip({
       >
         <ChevronRight className="h-4 w-4 lg:hidden" />
         <ChevronDown className="hidden h-4 w-4 lg:block" />
+      </button>
+      <button
+        type="button"
+        aria-label="Clear all saved results"
+        title="Clear all saved results and free memory"
+        onClick={handleClearAllHistory}
+        className="shrink-0 px-1.5 py-1 font-footer text-[10px] uppercase tracking-[0.12em] text-slate-500 transition-colors hover:text-slate-200 lg:w-full lg:px-0 lg:pt-1"
+      >
+        Clear all
       </button>
     </aside>
   )

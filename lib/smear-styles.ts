@@ -5,15 +5,12 @@
  * Snapshot smear: freeze the Cell, sample only that snapshot, and resolve reads
  * that leave the Cell one of two ways. Trails never leave the Cell either way.
  *
- *   wrap   reads fold around the Cell. Scrolling a Cell's contents is a cyclic
- *          vertical rotation, and a cyclic smear commutes with it — smearing
- *          scrolled pixels equals scrolling smeared pixels — so the trail is
- *          rigid and crosses the scroll's wrap line unbroken. Live Play's Fixed
- *          mode, and every static frame.
- *   clamp  reads hold at the trailing edge. The smear is then pinned to the Cell
- *          rather than to its contents, so as pixels scroll through, the trail
- *          re-forms every frame instead of sliding along with them. That churn
- *          is the whole point of Live Play's Dynamic mode.
+ *   wrap   reads fold around the Cell. Available as an API / test edge mode;
+ *          cyclic reads commute with a vertical scroll of the Cell's contents.
+ *   clamp  reads hold at the trailing edge. The production effect worker uses
+ *          this exclusively — for static frames and for Live Play — so trails
+ *          stay pinned to the Cell and re-form every frame as pixels scroll
+ *          through it.
  *
  * Directional assignment is mutually exclusive (`chooseSmear`): at most
  * one of Vertical / Horizontal / Diagonal per Cell. Recursive is a
@@ -45,7 +42,8 @@ import {
 
 /**
  * How a read that leaves the Cell resolves — see the module note. `wrap` is the
- * default everywhere; only Live Play's Dynamic mode asks for `clamp`.
+ * API default (and what the verify scripts exercise); the effect worker always
+ * passes `clamp` so Live Play trails re-form per frame.
  */
 export type SmearEdge = "wrap" | "clamp"
 
@@ -85,10 +83,9 @@ function signedSmear(amount: number): { mag: number; sign: number } {
  *
  * `pull` is added to integer row/column indices. A dyadic value keeps that sum
  * exactly representable, so `row + pull` and `(row − scroll) + pull` agree in
- * their fractional part to the bit. That is what lets Live Play's Fixed-mode
- * Cell cache smear once and rotate the result: without it the two paths differ
- * by one ULP, which is invisible in the smear itself but lands either side of
- * dither's and halftone's hard threshold and flips those pixels black↔white.
+ * their fractional part to the bit. Without it the two paths differ by one ULP,
+ * which is invisible in the smear itself but lands either side of dither's and
+ * halftone's hard threshold and flips those pixels black↔white.
  *
  * 1/64 px is far finer than anything visible — the pull spans up to a whole Cell.
  */
@@ -251,9 +248,9 @@ function blitSmearFromSnapshot(
  *
  * Under `wrap`, only the horizontal room constrains that retraction — vertical
  * reads wrap instead, which they must, because a row-dependent pull would vary
- * the smear down the Cell and Fixed mode's scroll would drag that variation
- * through the pixels and break the trail. Under `clamp` the vertical room
- * constrains it too, exactly as it always did.
+ * the smear down the Cell and a scroll of the contents would drag that
+ * variation through the pixels and break the trail. Under `clamp` the vertical
+ * room constrains it too, exactly as it always did.
  */
 function blitDiagonalFromSnapshot(
   data: Uint8ClampedArray,
@@ -529,20 +526,12 @@ function applySmearStyle(
 }
 
 /**
- * Apply directional smear (at most one), then Recursive on top when assigned.
+ * The directional pass on its own: at most one of Vertical / Horizontal /
+ * Diagonal, per `chooseSmear`. Split out from the Recursive pass below so each
+ * can be rolled and applied independently — `applySmearStyles` runs both.
  * Caller must already have seeded the Cell from its Color Master in `data`.
  */
-/**
- * The directional pass on its own: at most one of Vertical / Horizontal /
- * Diagonal, per `chooseSmear`.
- *
- * Split out because this half is the only one that survives Live Play's Fixed
- * mode cache. Under `wrap` a directional smear is a cyclic operation, so it
- * commutes with the in-Cell scroll — smearing scrolled pixels equals scrolling
- * smeared pixels — which is exactly what lets the worker compute it once and
- * rotate the result. See `resolveFixedCellEntry` in workers/effect-worker.ts.
- */
-export function applyDirectionalSmearPass(
+function applyDirectionalSmearPass(
   data: Uint8ClampedArray,
   fullWidth: number,
   fullHeight: number,
@@ -577,7 +566,7 @@ export function applyDirectionalSmearPass(
  * A zoom cannot commute with a translation, so this has to run per frame on
  * whatever the Cell currently holds.
  */
-export function applyRecursiveSmearPass(
+function applyRecursiveSmearPass(
   data: Uint8ClampedArray,
   fullWidth: number,
   fullHeight: number,
