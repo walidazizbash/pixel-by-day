@@ -7,7 +7,7 @@ import { Slider } from "@/components/ui/slider"
 import { Switch } from "@/components/ui/switch"
 import { ResetAmountButton } from "@/components/controls/ResetAmountButton"
 import { CONTROL_DEFAULTS, SLIT_SCAN_MODES, sliderValue } from "@/components/controls/defaults"
-import { controlField, controlLabel, helperText, sliderRow, sliderTrackClass, sliderValueReadout } from "@/components/controls/styles"
+import { controlField, controlLabel, sliderRow, sliderTrackClass, sliderValueReadout } from "@/components/controls/styles"
 import { cn } from "@/lib/utils"
 
 type SlitScanSectionProps = {
@@ -44,7 +44,7 @@ export const SlitScanSection = memo(function SlitScanSection({
   setSlitScanFrequency,
 }: SlitScanSectionProps) {
   return (
-    <div className="border-y border-white/5 py-4">
+    <div className="border-y border-ink/5 py-4">
       <div className="flex items-center justify-between gap-4">
         <div className="flex items-center gap-1.5">
           <label htmlFor="slit-scan-enabled" className={controlLabel}>
@@ -72,11 +72,11 @@ export const SlitScanSection = memo(function SlitScanSection({
           <div className="flex flex-col gap-3 pt-3">
 
             <div className={controlField}>
-              <span className={helperText}>Mode</span>
+              <span className={controlLabel}>Mode</span>
               <div
                 role="group"
                 aria-label="Slit Scan mode"
-                className="grid w-full grid-cols-3 rounded-lg border border-white/10 bg-slate-950/40 p-0.5"
+                className="grid w-full grid-cols-3 rounded-lg border border-ink/15 bg-surface-strong p-0.5"
               >
                 {SLIT_SCAN_MODES.map((option) => {
                   const active = slitScanMode === option.id
@@ -86,13 +86,10 @@ export const SlitScanSection = memo(function SlitScanSection({
                       type="button"
                       aria-pressed={active}
                       aria-label={option.title}
-                      title={option.title}
                       onClick={() => setSlitScanMode(option.id)}
                       className={cn(
                         "rounded-md px-1.5 py-1 text-xs font-medium transition-colors",
-                        active
-                          ? "bg-slate-200 text-slate-950"
-                          : "text-slate-300 hover:text-slate-100"
+                        active ? "bg-accent text-ink" : "text-ink hover:bg-ink/10"
                       )}
                     >
                       {option.label}
@@ -104,7 +101,7 @@ export const SlitScanSection = memo(function SlitScanSection({
             <div className="flex items-center justify-between gap-4">
               <label
                 htmlFor="slit-scan-luminance-mask"
-                className={helperText}
+                className={controlLabel}
               >
                 Luminance Mask
               </label>
@@ -115,7 +112,7 @@ export const SlitScanSection = memo(function SlitScanSection({
               />
             </div>
             <div className={controlField}>
-              <span className={helperText}>Weight</span>
+              <span className={controlLabel}>Weight</span>
               <div className={sliderRow}>
                 <Slider
                   id="weight-slit-scan"
@@ -154,7 +151,7 @@ export const SlitScanSection = memo(function SlitScanSection({
               </div>
             </div>
             <div className={controlField}>
-              <span className={helperText}>Amount</span>
+              <span className={controlLabel}>Amount</span>
               <div className={sliderRow}>
                 <Slider
                   id="slit-scan-amount"
@@ -193,7 +190,7 @@ export const SlitScanSection = memo(function SlitScanSection({
               </div>
             </div>
             <div className={controlField}>
-              <span className={helperText}>Frequency</span>
+              <span className={controlLabel}>Frequency</span>
               <div className={sliderRow}>
                 <Slider
                   id="slit-scan-frequency"

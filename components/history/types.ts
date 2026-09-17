@@ -1,4 +1,8 @@
-import type { EffectSettings, SpeedRampPoint } from "@/lib/effect-types"
+import type {
+  DirectionWeights,
+  EffectSettings,
+  SpeedRampPoint,
+} from "@/lib/effect-types"
 
 /** A user-captured snapshot of the current result, shown in the History sidebar. */
 export interface HistorySnapshot {
@@ -25,4 +29,11 @@ export interface HistorySnapshot {
    * regenerate with whatever ramp is live now.
    */
   speedRamp: SpeedRampPoint[]
+  /**
+   * Per-Cell Live Play scroll direction weights at capture time — sibling of
+   * `speedRamp`, not part of `EffectSettings`. Without it, Restore at a
+   * nonzero offset would regenerate with whatever direction weights are live
+   * now instead of what was actually captured.
+   */
+  directionWeights: DirectionWeights
 }

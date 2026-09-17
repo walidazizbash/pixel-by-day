@@ -5,17 +5,25 @@ import type {
   ComponentProps,
   Dispatch,
   PointerEvent as ReactPointerEvent,
+  ReactNode,
   RefObject,
   SetStateAction,
 } from "react"
-import { ChevronLeft, ChevronRight, Pause, Play, Spline } from "lucide-react"
-import type { EffectSettings, SpeedRampPoint } from "@/lib/effect-types"
+import { Camera, ChevronLeft, ChevronRight, Download, Folder, Move, Pause, Play, RotateCcw, Shuffle, Sparkles, Spline } from "lucide-react"
+import type {
+  DirectionWeights,
+  EffectSettings,
+  SpeedRampPoint,
+} from "@/lib/effect-types"
 import { Button } from "@/components/ui/button"
 import { LIVE_PLAY_SPEED } from "@/components/controls/defaults"
 import { SpeedRampCurve } from "@/components/controls/SpeedRampCurve"
 import {
+  controlField,
+  controlLabel,
   sliderValueReadout,
   toolbarActionButton,
+  toolbarPrimaryButton,
 } from "@/components/controls/styles"
 import { cn } from "@/lib/utils"
 
@@ -26,10 +34,76 @@ function preventTouchScroll(event: ReactPointerEvent<HTMLElement>) {
   }
 }
 
+/**
+ * A native `<input type="range">` styled to match the sidebar's `<Slider>`
+ * (`components/ui/slider.tsx`) — same reason the Speed control above uses one
+ * instead of the Base UI primitive directly: that control never resolved its
+ * measurement pass inside this toolbar's popovers and rendered as an invisible
+ * 3px line. Reused for the four Direction weight sliders below.
+ */
+function ToolbarSlider({
+  id,
+  label,
+  value,
+  onChange,
+}: {
+  id: string
+  label: string
+  value: number
+  onChange: (value: number) => void
+}) {
+  const percent = Math.min(100, Math.max(0, value))
+  return (
+    <div className={controlField}>
+      <div className="flex items-center justify-between gap-2">
+        <label htmlFor={id} className={controlLabel}>
+          {label}
+        </label>
+        <span className={sliderValueReadout} aria-hidden="true">
+          {Math.round(value)}
+        </span>
+      </div>
+      <input
+        id={id}
+        type="range"
+        aria-label={label}
+        min={0}
+        max={100}
+        step={1}
+        value={value}
+        onChange={(event) =>
+          onChange(Number.parseFloat(event.currentTarget.value))
+        }
+        onPointerDown={preventTouchScroll}
+        style={{
+          touchAction: "none",
+          backgroundImage:
+            "linear-gradient(to right, color-mix(in oklab, var(--color-ink) 45%, transparent), color-mix(in oklab, var(--color-ink) 45%, transparent))," +
+            "linear-gradient(to right, color-mix(in oklab, var(--color-ink) 10%, transparent), color-mix(in oklab, var(--color-ink) 10%, transparent))",
+          backgroundSize: `${percent}% 3px, 100% 3px`,
+          backgroundPosition: "left center",
+          backgroundRepeat: "no-repeat",
+        }}
+        className={cn(
+          "h-3.5 w-full min-w-0 touch-none cursor-pointer appearance-none bg-transparent outline-none",
+          "[&::-webkit-slider-runnable-track]:h-3.5 [&::-webkit-slider-runnable-track]:bg-transparent",
+          "[&::-webkit-slider-thumb]:size-3.5 [&::-webkit-slider-thumb]:cursor-pointer [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:border-0 [&::-webkit-slider-thumb]:bg-[var(--color-ink)] [&::-webkit-slider-thumb]:transition-shadow",
+          "[&:hover::-webkit-slider-thumb]:shadow-[0_0_0_5px_rgba(73,53,240,0.22)] [&:focus-visible::-webkit-slider-thumb]:shadow-[0_0_0_2px_var(--color-accent)]",
+          "[&::-moz-range-track]:h-[3px] [&::-moz-range-track]:bg-transparent",
+          "[&::-moz-range-thumb]:size-3.5 [&::-moz-range-thumb]:cursor-pointer [&::-moz-range-thumb]:rounded-full [&::-moz-range-thumb]:border-0 [&::-moz-range-thumb]:bg-[var(--color-ink)]"
+        )}
+      />
+    </div>
+  )
+}
+
 type HeaderControlsProps = {
   previewing: boolean
   handleRestore: () => void
   cancelPreview: () => void
+  imageSrc: string | null
+  fileInputRef: RefObject<HTMLInputElement | null>
+  /** Seed readout and stepper — same handlers `SeedSection` used before this moved back into the toolbar. */
   seed: number
   setSeed: Dispatch<SetStateAction<number>>
   autoFillHistory: EffectSettings[]
@@ -37,8 +111,6 @@ type HeaderControlsProps = {
   handleAutoFill: () => void
   handleAutoFillBack: () => void
   handleAutoFillForward: () => void
-  imageSrc: string | null
-  fileInputRef: RefObject<HTMLInputElement | null>
   isExportingPng: boolean
   exportHighResImage: () => void
   handleBakeClick: () => void
@@ -54,31 +126,61 @@ type HeaderControlsProps = {
   /** Per-Cell speed curve — see `components/controls/SpeedRampCurve.tsx`. */
   speedRamp: SpeedRampPoint[]
   setSpeedRamp: Dispatch<SetStateAction<SpeedRampPoint[]>>
+  /** Per-Cell scroll direction weights — see `lib/direction-weights.ts`. */
+  directionWeights: DirectionWeights
+  setDirectionWeights: Dispatch<SetStateAction<DirectionWeights>>
 }
 
 /**
- * Play / Load / Bake / Reset / Capture / Save share one outer width: the word
- * "Capture" (the longest label) plus `toolbarActionButton`'s padding, which
- * already steps down on small screens. An invisible "Capture" holds the width
- * in-flow; the real label is overlaid and centered so shorter words don't
- * shrink the pill and Capture never overflows it.
+ * Play / Load / Bake / Reset / Capture / Save all share the same outer width
+ * per breakpoint: the word "Capture" (the longest label) plus one icon and the
+ * button's own padding. An invisible "Capture" holds that width in-flow; the
+ * real icon+label is overlaid and centered so shorter words don't shrink the
+ * pill and Capture never overflows it.
+ *
+ * Load / Bake / Reset / Capture / Save (`tone="solid"`) render as one uniform
+ * opaque blue set — none singled out as "the primary one," Bake included.
+ * Play stays on the neutral border-and-wash treatment since it isn't part of
+ * that action row.
+ *
+ * The label stays visible at every breakpoint — a first-time user reading
+ * "Load" / "Reset" / "Save" is clearer than a bare icon, which is all that
+ * showed below `sm` before. Only the icon drops below `sm`, so on narrow
+ * screens the row shows five labeled buttons rather than five icons.
  */
 function EqualToolbarButton({
-  children,
+  icon,
+  label,
   className,
+  tone = "wash",
   ...props
-}: ComponentProps<typeof Button>) {
+}: ComponentProps<typeof Button> & {
+  icon: ReactNode
+  label: string
+  tone?: "wash" | "solid"
+}) {
   return (
     <Button
       size="sm"
-      className={cn(toolbarActionButton, "relative overflow-hidden", className)}
+      aria-label={label}
+      className={cn(
+        tone === "solid" ? toolbarPrimaryButton : toolbarActionButton,
+        "relative overflow-hidden",
+        className
+      )}
       {...props}
     >
-      <span className="invisible select-none" aria-hidden="true">
-        Capture
+      {/* Reserves the same width the real content below needs at each
+          breakpoint (icon+"Capture" at `sm+`, "Capture" alone below it), so
+          shorter labels don't shrink or shift the row and "Capture" never
+          overflows it. */}
+      <span className="invisible flex select-none items-center gap-1.5" aria-hidden="true">
+        <Camera className="hidden size-3.5 sm:block" strokeWidth={2} />
+        <span>Capture</span>
       </span>
-      <span className="absolute inset-0 flex items-center justify-center gap-1 whitespace-nowrap">
-        {children}
+      <span className="absolute inset-0 flex items-center justify-center gap-1.5 whitespace-nowrap">
+        <span className="hidden sm:flex">{icon}</span>
+        <span>{label}</span>
       </span>
     </Button>
   )
@@ -94,6 +196,8 @@ export function HeaderControls({
   previewing,
   handleRestore,
   cancelPreview,
+  imageSrc,
+  fileInputRef,
   seed,
   setSeed,
   autoFillHistory,
@@ -101,8 +205,6 @@ export function HeaderControls({
   handleAutoFill,
   handleAutoFillBack,
   handleAutoFillForward,
-  imageSrc,
-  fileInputRef,
   isExportingPng,
   exportHighResImage,
   handleBakeClick,
@@ -115,6 +217,8 @@ export function HeaderControls({
   setLivePlaySpeed,
   speedRamp,
   setSpeedRamp,
+  directionWeights,
+  setDirectionWeights,
 }: HeaderControlsProps) {
   /** Filled fraction of the speed track, mirroring the Slider's Indicator. */
   const speedPercent =
@@ -123,6 +227,8 @@ export function HeaderControls({
     100
   const [rampOpen, setRampOpen] = useState(false)
   const rampContainerRef = useRef<HTMLDivElement>(null)
+  const [directionOpen, setDirectionOpen] = useState(false)
+  const directionContainerRef = useRef<HTMLDivElement>(null)
 
   /**
    * Click-outside / Escape to close, via a document listener rather than a
@@ -150,8 +256,27 @@ export function HeaderControls({
     }
   }, [rampOpen])
 
+  /** Same click-outside / Escape mechanics as the Speed Ramp popover above. */
+  useEffect(() => {
+    if (!directionOpen) return
+    function handlePointerDown(event: PointerEvent) {
+      if (!directionContainerRef.current?.contains(event.target as Node)) {
+        setDirectionOpen(false)
+      }
+    }
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") setDirectionOpen(false)
+    }
+    document.addEventListener("pointerdown", handlePointerDown)
+    document.addEventListener("keydown", handleKeyDown)
+    return () => {
+      document.removeEventListener("pointerdown", handlePointerDown)
+      document.removeEventListener("keydown", handleKeyDown)
+    }
+  }, [directionOpen])
+
   return (
-    <div className="relative flex shrink-0 flex-col items-center gap-2 border-t border-white/10 px-3 py-2 md:gap-3 md:px-6 md:py-4">
+    <div className="relative flex shrink-0 flex-col items-center gap-2 border-t border-ink/10 px-3 py-2 md:gap-3 md:px-6 md:py-4">
       {/* Restore/Cancel sit on top of the hidden controls, so the toolbar keeps its
           exact height and the canvas above it never resizes. */}
       {previewing && (
@@ -159,7 +284,7 @@ export function HeaderControls({
           <Button
             type="button"
             size="sm"
-            className={cn(toolbarActionButton, "h-8 rounded-full px-6")}
+            className={cn(toolbarPrimaryButton, "h-8 px-6")}
             onClick={handleRestore}
           >
             Restore
@@ -168,7 +293,7 @@ export function HeaderControls({
             type="button"
             size="sm"
             variant="secondary"
-            className="h-8 rounded-full border border-zinc-700/50 bg-zinc-900 px-6 text-xs text-white hover:bg-zinc-800"
+            className={cn(toolbarActionButton, "h-8 px-6")}
             onClick={cancelPreview}
           >
             Cancel
@@ -182,30 +307,26 @@ export function HeaderControls({
         )}
         inert={previewing ? true : undefined}
       >
+        {/* Seed / Random, back on the toolbar's own line above Play/Speed —
+            same handlers as before, styled to match the Speed control:
+            a bordered pill with its label to the left of the control. */}
         <div className="flex min-w-0 flex-wrap items-center justify-center gap-1.5 md:gap-3">
-        <div className="flex min-w-0 max-w-[12rem] items-center gap-1.5 md:max-w-[12rem]">
-          <label
-            htmlFor="canvas-seed"
-            className="shrink-0 text-sm text-slate-300"
-          >
-            Seed
-          </label>
-          <div className="flex h-8 min-w-0 flex-1 items-center rounded-lg border border-white/10 bg-transparent">
+          <div className="flex h-8 shrink-0 items-center gap-2 rounded-lg border border-ink/15 px-3">
+            <span className="shrink-0 text-xs font-medium text-ink">
+              Seed
+            </span>
             <button
               type="button"
               aria-label="Decrease seed"
               onClick={() => setSeed((prev) => Math.max(0, prev - 1))}
-              className="inline-flex h-full shrink-0 items-center justify-center px-2 text-slate-300 transition-colors hover:text-slate-100 md:px-2"
+              className="inline-flex size-5 shrink-0 items-center justify-center text-ink-muted transition-colors hover:text-ink"
             >
-              <ChevronLeft
-                className="size-4 md:size-4"
-                strokeWidth={2}
-              />
+              <ChevronLeft className="size-3.5" strokeWidth={2} aria-hidden />
             </button>
             <input
-              id="canvas-seed"
               type="text"
               inputMode="numeric"
+              aria-label="Seed"
               value={seed}
               onChange={(event) => {
                 const digits = event.target.value.replace(/\D/g, "")
@@ -218,84 +339,67 @@ export function HeaderControls({
                   setSeed(Math.max(0, Math.min(99999, next)))
                 }
               }}
-              className="pointer-events-none min-w-0 w-12 flex-1 select-none bg-transparent py-2 text-center text-sm font-medium tabular-nums text-slate-200 outline-none md:pointer-events-auto md:select-auto"
+              className="w-12 shrink-0 bg-transparent text-center font-footer text-sm tabular-nums text-ink outline-none"
             />
             <button
               type="button"
               aria-label="Increase seed"
               onClick={() => setSeed((prev) => Math.min(99999, prev + 1))}
-              className="inline-flex h-full shrink-0 items-center justify-center px-2 text-slate-300 transition-colors hover:text-slate-100 md:px-2"
+              className="inline-flex size-5 shrink-0 items-center justify-center text-ink-muted transition-colors hover:text-ink"
             >
-              <ChevronRight
-                className="size-4 md:size-4"
-                strokeWidth={2}
-              />
+              <ChevronRight className="size-3.5" strokeWidth={2} aria-hidden />
+            </button>
+          </div>
+
+          <div className="flex h-8 shrink-0 items-center gap-2 rounded-lg border border-ink/15 px-3">
+            <span className="shrink-0 text-xs font-medium text-ink">
+              Random
+            </span>
+            <button
+              type="button"
+              aria-label="Previous Random"
+              disabled={!imageSrc || historyIndex <= 0}
+              onClick={handleAutoFillBack}
+              className="inline-flex size-5 shrink-0 items-center justify-center text-ink-muted transition-colors hover:text-ink disabled:pointer-events-none disabled:opacity-35"
+            >
+              <ChevronLeft className="size-3.5" strokeWidth={2} aria-hidden />
+            </button>
+            <button
+              type="button"
+              aria-label="Generate Random"
+              disabled={!imageSrc}
+              onClick={handleAutoFill}
+              className="inline-flex size-5 shrink-0 items-center justify-center text-accent-strong transition-colors hover:text-accent disabled:pointer-events-none disabled:opacity-35"
+            >
+              <Shuffle className="size-3.5" strokeWidth={2} aria-hidden />
+            </button>
+            <button
+              type="button"
+              aria-label="Next Random"
+              disabled={!imageSrc || historyIndex >= autoFillHistory.length - 1}
+              onClick={handleAutoFillForward}
+              className="inline-flex size-5 shrink-0 items-center justify-center text-ink-muted transition-colors hover:text-ink disabled:pointer-events-none disabled:opacity-35"
+            >
+              <ChevronRight className="size-3.5" strokeWidth={2} aria-hidden />
             </button>
           </div>
         </div>
-
-        <div className="flex h-8 min-w-0 items-center rounded-lg border border-white/10 bg-transparent">
-          <button
-            type="button"
-            aria-label="Previous Random"
-            title="Previous Random"
-            disabled={!imageSrc || historyIndex <= 0}
-            onClick={handleAutoFillBack}
-            className="inline-flex h-full shrink-0 items-center justify-center px-2 text-slate-300 transition-colors hover:text-slate-100 disabled:pointer-events-none disabled:opacity-35 md:px-2"
-          >
-            <ChevronLeft
-              className="size-4 md:size-4"
-              strokeWidth={2}
-            />
-          </button>
-          <button
-            type="button"
-            aria-label="Generate Random"
-            title="Randomize layout and effects (keeps grain settings)"
-            disabled={!imageSrc}
-            onClick={handleAutoFill}
-            className="min-w-0 px-2.5 py-2 text-center text-sm font-medium text-slate-300 transition-colors hover:text-slate-100 disabled:pointer-events-none disabled:opacity-35"
-          >
-            Random
-          </button>
-          <button
-            type="button"
-            aria-label="Next Random"
-            title="Next Random"
-            disabled={
-              !imageSrc || historyIndex >= autoFillHistory.length - 1
-            }
-            onClick={handleAutoFillForward}
-            className="inline-flex h-full shrink-0 items-center justify-center px-2 text-slate-300 transition-colors hover:text-slate-100 disabled:pointer-events-none disabled:opacity-35 md:px-2"
-          >
-            <ChevronRight
-              className="size-4 md:size-4"
-              strokeWidth={2}
-            />
-          </button>
-        </div>
-        </div>
-
         <div className="flex min-w-0 flex-wrap items-center justify-center gap-1.5 md:gap-3">
         <EqualToolbarButton
           type="button"
           aria-label={isPlaying ? "Pause Live Play" : "Start Live Play"}
           aria-pressed={isPlaying}
-          title={
-            isPlaying
-              ? "Pause the scrolling Cells"
-              : "Scroll the pixels inside each Cell; the grid stays put"
-          }
           disabled={!imageSrc}
           onClick={togglePlaying}
-        >
-          {isPlaying ? (
-            <Pause className="size-3.5" strokeWidth={2} />
-          ) : (
-            <Play className="size-3.5" strokeWidth={2} />
-          )}
-          {isPlaying ? "Pause" : "Play"}
-        </EqualToolbarButton>
+          icon={
+            isPlaying ? (
+              <Pause className="size-3.5" strokeWidth={2} aria-hidden />
+            ) : (
+              <Play className="size-3.5" strokeWidth={2} aria-hidden />
+            )
+          }
+          label={isPlaying ? "Pause" : "Play"}
+        />
 
         {/* Speed.
 
@@ -307,22 +411,21 @@ export function HeaderControls({
             as a static readout. A native range input needs no measurement pass —
             it paints its own track and thumb — so it cannot fail that way.
 
-            Styled to match components/ui/slider.tsx exactly: a 3px slate-700/50
-            track, a slate-500 → slate-300 → slate-200 fill across the filled
-            portion, and a 3.5 slate-300 → slate-500 thumb with the same hover
-            glow. The colours come from the theme variables rather than hex, so
-            they stay in step with the rest of the palette. The input itself is
-            taller than the 3px band purely to give the thumb a grabbable area.
+            Styled to match components/ui/slider.tsx exactly: a 3px ink/10
+            track, an ink/45 fill across the filled portion, and a 3.5 solid
+            ink thumb with the same blue hover/focus glow. The colours come
+            from the theme variables rather than hex, so they stay in step
+            with the rest of the palette. The input itself is taller than the
+            3px band purely to give the thumb a grabbable area.
 
             Not gated on `imageSrc` either: it is a playback preference, not an
             image operation, and disabled opacity also made it look inert. */}
         <div
-          className="flex h-8 shrink-0 touch-none items-center gap-2.5 rounded-lg border border-white/10 px-3"
-          title="Live Play speed — pixels of scroll per rendered frame"
+          className="flex h-8 shrink-0 touch-none items-center gap-2.5 rounded-lg border border-ink/15 px-3"
           style={{ touchAction: "none" }}
           onPointerDown={preventTouchScroll}
         >
-          <span className="shrink-0 text-xs font-medium text-slate-400">
+          <span className="shrink-0 text-xs font-medium text-ink">
             Speed
           </span>
           <input
@@ -339,8 +442,8 @@ export function HeaderControls({
             style={{
               touchAction: "none",
               backgroundImage:
-                "linear-gradient(to right, var(--color-slate-500), var(--color-slate-300), var(--color-slate-200))," +
-                "linear-gradient(to right, color-mix(in oklab, var(--color-slate-700) 50%, transparent), color-mix(in oklab, var(--color-slate-700) 50%, transparent))",
+                "linear-gradient(to right, color-mix(in oklab, var(--color-ink) 45%, transparent), color-mix(in oklab, var(--color-ink) 45%, transparent))," +
+                "linear-gradient(to right, color-mix(in oklab, var(--color-ink) 10%, transparent), color-mix(in oklab, var(--color-ink) 10%, transparent))",
               backgroundSize: `${speedPercent}% 3px, 100% 3px`,
               backgroundPosition: "left center",
               backgroundRepeat: "no-repeat",
@@ -348,10 +451,10 @@ export function HeaderControls({
             className={cn(
               "h-3.5 w-24 min-w-0 touch-none cursor-pointer appearance-none bg-transparent outline-none md:w-28",
               "[&::-webkit-slider-runnable-track]:h-3.5 [&::-webkit-slider-runnable-track]:bg-transparent",
-              "[&::-webkit-slider-thumb]:size-3.5 [&::-webkit-slider-thumb]:cursor-pointer [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:border-0 [&::-webkit-slider-thumb]:bg-[linear-gradient(to_bottom,var(--color-slate-300),var(--color-slate-400),var(--color-slate-500))] [&::-webkit-slider-thumb]:transition-shadow",
-              "[&:hover::-webkit-slider-thumb]:shadow-[0_0_12px_rgba(255,255,255,0.25)] [&:focus-visible::-webkit-slider-thumb]:shadow-[0_0_0_2px_rgba(255,255,255,0.35)]",
+              "[&::-webkit-slider-thumb]:size-3.5 [&::-webkit-slider-thumb]:cursor-pointer [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:border-0 [&::-webkit-slider-thumb]:bg-[var(--color-ink)] [&::-webkit-slider-thumb]:transition-shadow",
+              "[&:hover::-webkit-slider-thumb]:shadow-[0_0_0_5px_rgba(73,53,240,0.22)] [&:focus-visible::-webkit-slider-thumb]:shadow-[0_0_0_2px_var(--color-accent)]",
               "[&::-moz-range-track]:h-[3px] [&::-moz-range-track]:bg-transparent",
-              "[&::-moz-range-thumb]:size-3.5 [&::-moz-range-thumb]:cursor-pointer [&::-moz-range-thumb]:rounded-full [&::-moz-range-thumb]:border-0 [&::-moz-range-thumb]:bg-[linear-gradient(to_bottom,var(--color-slate-300),var(--color-slate-400),var(--color-slate-500))]"
+              "[&::-moz-range-thumb]:size-3.5 [&::-moz-range-thumb]:cursor-pointer [&::-moz-range-thumb]:rounded-full [&::-moz-range-thumb]:border-0 [&::-moz-range-thumb]:bg-[var(--color-ink)]"
             )}
           />
           <span className={sliderValueReadout} aria-hidden="true">
@@ -368,11 +471,10 @@ export function HeaderControls({
             type="button"
             aria-label={rampOpen ? "Close speed ramp editor" : "Open speed ramp editor"}
             aria-expanded={rampOpen}
-            title="Speed ramp — shape how Live Play speed varies across Cells"
             onClick={() => setRampOpen((prev) => !prev)}
             className={cn(
-              "inline-flex size-8 shrink-0 items-center justify-center rounded-lg border border-white/10 text-slate-300 transition-colors hover:text-slate-100",
-              rampOpen ? "bg-white/10 text-slate-100" : "bg-transparent"
+              "inline-flex size-8 shrink-0 items-center justify-center rounded-lg border border-ink/15 text-ink-muted transition-colors hover:text-ink",
+              rampOpen ? "bg-ink/10 text-ink" : "bg-transparent"
             )}
           >
             <Spline className="size-4" strokeWidth={2} aria-hidden />
@@ -380,7 +482,7 @@ export function HeaderControls({
 
           {rampOpen && (
             <div
-              className="absolute bottom-full right-0 z-40 mb-2 w-72 touch-none rounded-2xl border border-white/10 bg-slate-900/95 px-4 py-3 text-[#f5f5f7] shadow-[0_16px_48px_rgba(0,0,0,0.65)] backdrop-blur-xl"
+              className="absolute bottom-full right-0 z-40 mb-2 w-72 touch-none rounded-xl border border-ink/15 bg-surface-card px-4 py-3 text-ink shadow-[0_16px_48px_rgba(0,0,0,0.5)]"
               style={{ touchAction: "none" }}
               onPointerDown={preventTouchScroll}
             >
@@ -392,57 +494,125 @@ export function HeaderControls({
             </div>
           )}
         </div>
+
+        {/* Direction toggle, same popover mechanics as Speed Ramp: each Cell rolls
+            one of Up / Down / Left / Right for its Live Play scroll via the same
+            base-100 weighted bucket logic as Effects and Smears (`chooseDirection`
+            in the effect worker). Default Down:100 preserves the pre-existing
+            all-down scroll exactly. */}
+        <div className="relative" ref={directionContainerRef}>
+          <button
+            type="button"
+            aria-label={directionOpen ? "Close direction editor" : "Open direction editor"}
+            aria-expanded={directionOpen}
+            onClick={() => setDirectionOpen((prev) => !prev)}
+            className={cn(
+              "inline-flex size-8 shrink-0 items-center justify-center rounded-lg border border-ink/15 text-ink-muted transition-colors hover:text-ink",
+              directionOpen ? "bg-ink/10 text-ink" : "bg-transparent"
+            )}
+          >
+            <Move className="size-4" strokeWidth={2} aria-hidden />
+          </button>
+
+          {directionOpen && (
+            <div
+              className="absolute bottom-full right-0 z-40 mb-2 w-64 touch-none rounded-xl border border-ink/15 bg-surface-card px-4 py-3 text-ink shadow-[0_16px_48px_rgba(0,0,0,0.5)]"
+              style={{ touchAction: "none" }}
+              onPointerDown={preventTouchScroll}
+            >
+              <span className="font-heading text-xs font-medium uppercase tracking-[0.12em] text-ink">
+                Direction
+              </span>
+              <div className="mt-3 flex flex-col gap-3">
+                <ToolbarSlider
+                  id="direction-up"
+                  label="Up"
+                  value={directionWeights.up}
+                  onChange={(value) =>
+                    setDirectionWeights((prev) => ({ ...prev, up: value }))
+                  }
+                />
+                <ToolbarSlider
+                  id="direction-down"
+                  label="Down"
+                  value={directionWeights.down}
+                  onChange={(value) =>
+                    setDirectionWeights((prev) => ({ ...prev, down: value }))
+                  }
+                />
+                <ToolbarSlider
+                  id="direction-left"
+                  label="Left"
+                  value={directionWeights.left}
+                  onChange={(value) =>
+                    setDirectionWeights((prev) => ({ ...prev, left: value }))
+                  }
+                />
+                <ToolbarSlider
+                  id="direction-right"
+                  label="Right"
+                  value={directionWeights.right}
+                  onChange={(value) =>
+                    setDirectionWeights((prev) => ({ ...prev, right: value }))
+                  }
+                />
+              </div>
+            </div>
+          )}
+        </div>
         </div>
       </div>
 
       <div
         className={cn(
-          "hide-scrollbar flex w-full max-w-full flex-row flex-nowrap items-center justify-center-safe gap-1 overflow-x-auto transition-opacity duration-300 lg:max-w-none lg:gap-3 lg:overflow-visible lg:flex-wrap lg:justify-center",
+          "flex w-full flex-wrap items-center justify-center gap-1.5 transition-opacity duration-300 lg:gap-3",
           previewing && "invisible"
         )}
         inert={previewing ? true : undefined}
       >
           <EqualToolbarButton
             type="button"
+            tone="solid"
             onClick={() => {
               if (fileInputRef.current) {
                 fileInputRef.current.value = ""
                 fileInputRef.current.click()
               }
             }}
-          >
-            Load
-          </EqualToolbarButton>
+            icon={<Folder className="size-3.5" strokeWidth={2} aria-hidden />}
+            label="Load"
+          />
           <EqualToolbarButton
             type="button"
+            tone="solid"
             disabled={!imageSrc || isBaking}
-            title="Bake the current output as the next input image"
             onClick={handleBakeClick}
-          >
-            Bake
-          </EqualToolbarButton>
+            icon={<Sparkles className="size-3.5" strokeWidth={2} aria-hidden />}
+            label="Bake"
+          />
           <EqualToolbarButton
             type="button"
+            tone="solid"
             disabled={!imageSrc}
-            title="Zero effects and smears; restore Cell Pattern and Noise Mask defaults (keeps grain)"
             onClick={resetGenerationParameters}
-          >
-            Reset
-          </EqualToolbarButton>
+            icon={<RotateCcw className="size-3.5" strokeWidth={2} aria-hidden />}
+            label="Reset"
+          />
           <EqualToolbarButton
             type="button"
+            tone="solid"
             disabled={!imageSrc}
-            title="Save a thumbnail of this result to History"
             onClick={handleCapture}
-          >
-            Capture
-          </EqualToolbarButton>
+            icon={<Camera className="size-3.5" strokeWidth={2} aria-hidden />}
+            label="Capture"
+          />
           <EqualToolbarButton
+            tone="solid"
             disabled={!imageSrc || isExportingPng}
             onClick={exportHighResImage}
-          >
-            Save
-          </EqualToolbarButton>
+            icon={<Download className="size-3.5" strokeWidth={2} aria-hidden />}
+            label="Save"
+          />
       </div>
     </div>
   )

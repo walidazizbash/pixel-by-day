@@ -2,7 +2,7 @@
 
 import { useEffect, useId, useRef, type Dispatch, type SetStateAction } from "react"
 import { Button } from "@/components/ui/button"
-import { toolbarActionButton } from "@/components/controls/styles"
+import { toolbarPrimaryButton } from "@/components/controls/styles"
 import { cn } from "@/lib/utils"
 
 type BakeDialogProps = {
@@ -118,11 +118,11 @@ export function BakeDialog({
         aria-modal="true"
         aria-labelledby={titleId}
         tabIndex={-1}
-        className="relative z-10 w-full max-w-sm rounded-2xl border border-white/10 bg-slate-900/95 p-6 text-[#f5f5f7] shadow-[0_16px_48px_rgba(0,0,0,0.65)] backdrop-blur-xl outline-none"
+        className="relative z-10 w-full max-w-sm rounded-xl border border-ink/15 bg-surface-card p-6 text-ink shadow-[0_16px_48px_rgba(0,0,0,0.5)] outline-none"
       >
         <p
           id={titleId}
-          className="text-center font-body text-sm leading-relaxed text-slate-200"
+          className="text-center font-body text-sm leading-relaxed text-ink/90"
         >
           This will replace your original image
           <br />
@@ -133,7 +133,7 @@ export function BakeDialog({
             type="button"
             size="sm"
             variant="outline"
-            className="h-8 rounded-2xl border-white/10 bg-transparent px-4 text-xs font-semibold text-slate-300 shadow-none hover:bg-white/5 hover:text-slate-100"
+            className="h-8 rounded-lg border-ink/15 bg-transparent px-4 text-xs font-semibold text-ink shadow-none hover:bg-ink/10"
             disabled={isBaking}
             onClick={() => setBakeConfirmOpen(false)}
           >
@@ -142,7 +142,7 @@ export function BakeDialog({
           <Button
             type="button"
             size="sm"
-            className={cn(toolbarActionButton, "h-8 px-4")}
+            className={cn(toolbarPrimaryButton, "h-8 px-4")}
             disabled={isBaking}
             onClick={() => {
               void confirmBake()

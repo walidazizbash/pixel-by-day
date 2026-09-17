@@ -9,41 +9,49 @@
 import { cn } from "@/lib/utils"
 
 export const floatingCard =
-  "shrink-0 overflow-visible rounded-2xl border border-white/10 bg-slate-900/40 p-6 text-[#f5f5f7] shadow-[0_8px_32px_rgba(0,0,0,0.5)] backdrop-blur-xl"
+  "shrink-0 overflow-visible rounded-xl border border-ink/10 bg-surface-card p-6 text-ink shadow-[0_2px_10px_rgba(0,0,0,0.35)]"
 export const pageTitle =
-  "font-heading text-sm font-semibold tracking-tight text-[#f5f5f7]"
+  "font-heading text-2xl font-semibold tracking-tight text-white lg:text-[1.75rem]"
 export const sectionTitle =
-  "font-heading text-xs font-medium uppercase tracking-[0.12em] text-slate-300"
-export const controlLabel = "font-body text-sm text-slate-300"
+  "font-heading text-xs font-medium uppercase tracking-[0.14em] text-white"
+export const controlLabel = "font-body text-sm text-ink"
 /**
- * The small-screen `px-2.5` is a deliberate ceiling, not a guess. These sit in a
- * `flex-nowrap` / `overflow-x-auto` strip below `lg` and are `shrink-0`, so padding is
- * never compressed — it just pushes the five buttons into horizontal scrolling. 10px a
- * side is about the most that keeps them all on screen at ~360px.
- *
- * Kept to two steps on purpose: a `sm:` step would leak into the `cn(toolbarActionButton,
- * "... px-6")` call sites, since tailwind-merge only resolves conflicts within a matching
- * variant and an unprefixed override cannot cancel a prefixed one.
+ * Neutral border-and-wash button. Only used for Play (`EqualToolbarButton`'s
+ * default "wash" tone) and Cancel (History preview) — the actions that
+ * deliberately read as secondary next to the opaque blue ones below.
+ * Below `sm`, `EqualToolbarButton` drops each button's text label (icon only)
+ * so its row still fits without horizontal scrolling — see that component.
  */
 export const toolbarActionButton =
-  "h-7 shrink-0 rounded-2xl border border-white/10 bg-gradient-to-b from-slate-300 via-slate-400 to-slate-500 px-2.5 text-xs font-semibold text-slate-950 shadow-none transition-[background,opacity,transform] hover:from-slate-200 hover:via-slate-300 hover:to-slate-400 lg:h-8 lg:px-6"
+  "h-7 shrink-0 rounded-lg border border-accent/40 bg-accent/10 px-2.5 text-xs font-semibold text-ink shadow-none transition-colors hover:border-accent/60 hover:bg-accent/20 active:bg-accent/25 lg:h-8 lg:px-6"
+/**
+ * Opaque blue button — white text/icons for contrast against the solid fill.
+ * Used for the canvas action toolbar (Load/Bake/Reset/Capture/Save, all five
+ * identical, none singled out as "the primary one") via `EqualToolbarButton`'s
+ * `tone="solid"`, plus Restore (History preview) and Confirm (Bake dialog).
+ */
+export const toolbarPrimaryButton =
+  "h-7 shrink-0 rounded-lg border border-transparent bg-accent px-2.5 text-xs font-semibold text-ink shadow-none transition-colors hover:bg-accent-hover lg:h-8 lg:px-6"
 /**
  * The box the rendered image occupies. Shared by the live canvas pane and the preview
  * overlay so the preview lands on exactly the canvas's footprint — they must stay identical.
  * No viewport-height cap: a mid-size `max-h-[80vh]` made the image collapse between
- * mobile and desktop breakpoints, then jump back.
+ * mobile and desktop breakpoints, then jump back. No width cap either — the artwork
+ * is meant to dominate its column, and `object-scale-down` on the `<canvas>` itself
+ * already prevents any upscaling past the rendered bitmap's own pixel size.
  */
 export const canvasBoxClass =
-  "flex size-full max-w-[1200px] items-center justify-center overflow-hidden"
-export const helperText = "font-body text-xs text-slate-400"
-export const bodyText = "font-body text-sm font-medium text-slate-200"
-export const footerText = "font-footer text-xs text-slate-400"
+  "flex size-full items-center justify-center overflow-hidden"
+export const helperText = "font-body text-xs text-ink-muted"
+export const bodyText = "font-body text-sm font-medium text-ink"
+/** Footer credit — ~2× callout border (`border-ink/10` → 20% ink). */
+export const footerText = "font-footer text-xs text-footer-credit"
 export const footerLink =
-  "font-footer text-slate-300 transition-colors hover:text-slate-100"
+  "font-footer text-footer-name transition-colors hover:text-footer-name-hover"
 export const controlField = "flex flex-col gap-1.5"
 export const sliderRow = "flex w-full min-w-0 items-center gap-1.5"
 export const sliderTrackClass = "w-full min-w-0 flex-1"
 export const sliderValueReadout = cn(
-  footerText,
+  "font-footer text-xs text-ink",
   "w-8 shrink-0 text-right tabular-nums"
 )

@@ -11,7 +11,7 @@ function CollapseChevron({ open }: { open: boolean }) {
       viewBox="0 0 12 12"
       fill="currentColor"
       className={cn(
-        "size-3 shrink-0 text-slate-400 transition-transform duration-200",
+        "size-3 shrink-0 text-ink-muted transition-transform duration-200",
         open && "rotate-180"
       )}
     >
@@ -60,27 +60,18 @@ export function CollapsibleCallout({
             : `Expand ${title}${enabled ? ` (${enabledLabel.toLowerCase()})` : ""}`
         }
         className={cn(
-          "group relative flex h-10 w-full items-center justify-between bg-slate-800/50 px-4 font-heading",
+          "group relative flex h-11 w-full items-center justify-between bg-surface-strong px-5 font-heading transition-colors hover:bg-ink/5",
           open
-            ? "rounded-t-2xl border-b border-white/5"
-            : "rounded-2xl border-b border-transparent"
+            ? "rounded-t-xl border-b border-ink/5"
+            : "rounded-xl border-b border-transparent"
         )}
       >
-        <span
-          aria-hidden
-          className={cn(
-            "pointer-events-none absolute inset-0 overflow-hidden",
-            open ? "rounded-t-2xl" : "rounded-2xl"
-          )}
-        >
-          <span className="absolute inset-0 bg-[linear-gradient(180deg,rgba(226,240,255,0.62)_0%,rgba(186,214,245,0.52)_10%,rgba(148,180,220,0.4)_25%,rgba(125,160,210,0.28)_45%,rgba(100,116,139,0.16)_70%,rgba(71,85,105,0.08)_100%)] opacity-0 transition-opacity duration-300 ease-out group-hover:opacity-100" />
-        </span>
         <span className={cn("relative z-10 block truncate pr-28", titleClassName)}>
           {title}
         </span>
-        <span className="absolute top-1/2 right-4 z-10 flex -translate-y-1/2 items-center gap-3">
+        <span className="absolute top-1/2 right-5 z-10 flex -translate-y-1/2 items-center gap-3">
           {enabled && (
-            <span className="text-[10px] font-normal uppercase leading-none tracking-[0.16em] text-sky-400">
+            <span className="text-[10px] font-normal uppercase leading-none tracking-[0.16em] text-accent-strong">
               {enabledLabel}
             </span>
           )}
@@ -88,7 +79,7 @@ export function CollapsibleCallout({
         </span>
       </button>
       {open && (
-        <CardContent className="flex flex-col gap-5 overflow-visible px-6 pb-6 pt-4">
+        <CardContent className="flex flex-col gap-6 overflow-visible px-6 pb-7 pt-5">
           {children}
         </CardContent>
       )}

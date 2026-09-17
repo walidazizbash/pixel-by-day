@@ -37,7 +37,16 @@ export function CanvasViewport({
   cancelPreview,
 }: CanvasViewportProps) {
   return (
-    <div className="relative flex min-h-0 w-full flex-1 touch-manipulation items-center justify-center overflow-hidden p-2 text-slate-400 sm:p-4 md:p-6">
+    <div
+      className="relative flex min-h-0 w-full flex-1 touch-manipulation items-center justify-center overflow-hidden p-2 text-ink-muted sm:p-3 lg:p-4"
+      style={{
+        // Faint diagonal hatch behind the output image — reads as "canvas",
+        // covered by the image itself once one is loaded and opaque, only
+        // visible in the letterboxed margin and the empty-state dropzone.
+        backgroundImage:
+          "repeating-linear-gradient(45deg, color-mix(in oklab, var(--color-ink) 6%, transparent) 0px, color-mix(in oklab, var(--color-ink) 6%, transparent) 1px, transparent 1px, transparent 5px)",
+      }}
+    >
       {imageSrc ? (
         <div className={cn(canvasBoxClass, "touch-manipulation")}>
           {/* Fills the reserved box at every viewport size, so the first frame
@@ -62,7 +71,7 @@ export function CanvasViewport({
           onDrop={handleDrop}
           className="absolute inset-0 z-0 flex touch-auto flex-col items-center justify-center gap-1.5 px-6 text-center"
         >
-          <span className="pointer-events-none flex size-9 items-center justify-center rounded-lg border border-white/10 bg-transparent text-sm font-medium leading-none text-slate-300 sm:size-[4.5rem] sm:rounded-xl sm:text-2xl">
+          <span className="pointer-events-none flex size-9 items-center justify-center rounded-lg border border-ink/15 bg-transparent text-sm font-medium leading-none text-ink-muted sm:size-[4.5rem] sm:rounded-xl sm:text-2xl">
             +
           </span>
           <span className={cn("pointer-events-none", bodyText)}>
@@ -91,7 +100,7 @@ export function CanvasViewport({
           role="dialog"
           aria-modal="true"
           aria-label="Saved result preview"
-          className="absolute inset-0 z-40 flex items-center justify-center bg-[#08080a] p-2 sm:p-4 md:p-6"
+          className="absolute inset-0 z-40 flex items-center justify-center bg-surface p-2 sm:p-3 lg:p-4"
           onClick={cancelPreview}
         >
           <div className={canvasBoxClass}>

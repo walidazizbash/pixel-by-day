@@ -6,51 +6,67 @@
 
 import type { TextureEffectName } from "@/lib/pipeline"
 
-const DITHER_SCALE = 2
 const PIXELATE_SIZE = 4
 const PIXELATE_COLOR_STEPS = 4
+/** 1× ramp bin — 6× multiplies this to 36px. */
 const HALFTONE_DOT_SIZE = 6
 
-const BAYER_MATRIX = [
-  0, 128, 32, 160, 8, 136, 40, 168, 192, 64, 224, 96, 200, 72, 232, 104, 48,
-  176, 16, 144, 56, 184, 24, 152, 240, 112, 208, 80, 248, 120, 216, 88, 12,
-  140, 44, 172, 4, 132, 36, 164, 204, 76, 236, 108, 196, 68, 228, 100, 60,
-  188, 28, 156, 52, 180, 20, 148, 252, 124, 220, 92, 244, 116, 212, 84,
+/**
+ * Standard 8×8 Bayer ordered-dither thresholds, mapped 0–63 → 0–255 (`n * 4`).
+ * Screened per pixel so the pattern is continuous across Cell borders.
+ */
+const BAYER_8X8 = [
+  [0, 128, 32, 160, 8, 136, 40, 168],
+  [192, 64, 224, 96, 200, 72, 232, 104],
+  [48, 176, 16, 144, 56, 184, 24, 152],
+  [240, 112, 208, 80, 248, 120, 216, 88],
+  [12, 140, 44, 172, 4, 132, 36, 164],
+  [204, 76, 236, 108, 196, 68, 228, 100],
+  [60, 188, 28, 156, 52, 180, 20, 148],
+  [252, 124, 220, 92, 244, 116, 212, 84],
 ] as const
 
+/** Light ink for 1-bit Bayer — pale mint green. */
+const DITHER_LIGHT_R = 186
+const DITHER_LIGHT_G = 219
+const DITHER_LIGHT_B = 184
+
+/**
+ * 1-bit ordered dither: luminance vs Bayer threshold → black or mint.
+ * `scale` magnifies the matrix so a Cell can run chunky 2× / 4× / 8× dots.
+ */
 function applyDither(
   data: Uint8ClampedArray,
   fullWidth: number,
   cellX: number,
   cellY: number,
   width: number,
-  height: number
+  height: number,
+  scale: number,
+  invert: boolean
 ) {
-  const scale = DITHER_SCALE
+  const pixelScale = scale < 1 ? 1 : scale | 0
   for (let localY = 0; localY < height; localY++) {
     const absY = cellY + localY
+    const row = absY * fullWidth
+    const matrixY = Math.floor(absY / pixelScale) % 8
     for (let localX = 0; localX < width; localX++) {
       const absX = cellX + localX
-      const qAbsX = absX - (absX % scale)
-      const qAbsY = absY - (absY % scale)
-      const qLocalX = Math.min(width - 1, Math.max(0, qAbsX - cellX))
-      const qLocalY = Math.min(height - 1, Math.max(0, qAbsY - cellY))
-      const qIndex = ((cellY + qLocalY) * fullWidth + (cellX + qLocalX)) * 4
-
-      const r = data[qIndex]!
-      const g = data[qIndex + 1]!
-      const b = data[qIndex + 2]!
-      const lum = 0.299 * r + 0.587 * g + 0.114 * b
-
-      const scaledX = (absX / scale) | 0
-      const scaledY = (absY / scale) | 0
-      const threshold = BAYER_MATRIX[(scaledY & 7) * 8 + (scaledX & 7)]!
-      const v = lum > threshold ? 255 : 0
-
-      const i = (absY * fullWidth + absX) * 4
-      data[i] = v
-      data[i + 1] = v
-      data[i + 2] = v
+      const i = (row + absX) * 4
+      const lum = 0.299 * data[i]! + 0.587 * data[i + 1]! + 0.114 * data[i + 2]!
+      const matrixX = Math.floor(absX / pixelScale) % 8
+      const threshold = BAYER_8X8[matrixY]![matrixX]!
+      const dark = lum < threshold
+      const useLight = invert ? dark : !dark
+      if (useLight) {
+        data[i] = DITHER_LIGHT_R
+        data[i + 1] = DITHER_LIGHT_G
+        data[i + 2] = DITHER_LIGHT_B
+      } else {
+        data[i] = 0
+        data[i + 1] = 0
+        data[i + 2] = 0
+      }
     }
   }
 }
@@ -123,9 +139,12 @@ function applyHalftone(
   cellX: number,
   cellY: number,
   width: number,
-  height: number
+  height: number,
+  scale: number,
+  invert: boolean
 ) {
-  const dotSize = HALFTONE_DOT_SIZE
+  const pixelScale = scale < 1 ? 1 : scale | 0
+  const dotSize = HALFTONE_DOT_SIZE * pixelScale
   const maxRadius = dotSize / 2
   const cellRight = cellX + width
   const cellBottom = cellY + height
@@ -161,7 +180,9 @@ function applyHalftone(
           const px = gx + x
           const dx = px + 0.5 - cx
           const i = (row + px) * 4
-          const v = dx * dx + dy * dy <= radiusSq ? 0 : 255
+          const ink = invert ? 255 : 0
+          const paper = invert ? 0 : 255
+          const v = dx * dx + dy * dy <= radiusSq ? ink : paper
           data[i] = v
           data[i + 1] = v
           data[i + 2] = v
@@ -180,10 +201,23 @@ export function applyTexture(
   cellX: number,
   cellY: number,
   width: number,
-  height: number
+  height: number,
+  ditherScale = 1,
+  halftoneScale = 1,
+  ditherInvert = false,
+  halftoneInvert = false
 ) {
   if (effect === "dither") {
-    applyDither(data, fullWidth, cellX, cellY, width, height)
+    applyDither(
+      data,
+      fullWidth,
+      cellX,
+      cellY,
+      width,
+      height,
+      ditherScale,
+      ditherInvert
+    )
   } else if (effect === "pixelate") {
     applyPixelate(
       data,
@@ -195,6 +229,15 @@ export function applyTexture(
       height
     )
   } else if (effect === "halftone") {
-    applyHalftone(data, fullWidth, cellX, cellY, width, height)
+    applyHalftone(
+      data,
+      fullWidth,
+      cellX,
+      cellY,
+      width,
+      height,
+      halftoneScale,
+      halftoneInvert
+    )
   }
 }

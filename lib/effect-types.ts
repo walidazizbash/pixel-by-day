@@ -1,5 +1,6 @@
 import type { SubdivisionMode } from "@/lib/layout-types"
 import type { SpeedRampPoint } from "@/lib/speed-ramp"
+import type { DirectionWeights } from "@/lib/direction-weights"
 
 export type {
   CachedCell,
@@ -8,6 +9,7 @@ export type {
   SubdivisionMode,
 } from "@/lib/layout-types"
 export type { SpeedRampPoint } from "@/lib/speed-ramp"
+export type { Direction, DirectionWeights } from "@/lib/direction-weights"
 
 /**
  * Cell assignment names. Color vs texture routing lives in `lib/pipeline.ts`.
@@ -49,6 +51,17 @@ export type EffectSettings = {
   seed: number
   /** UI 0–100 weight for dither assignment (base-100 coverage; remainder is original). */
   weightDither: number
+  /**
+   * Per-Cell Bayer scale curve (see `lib/dither-ramp.ts`). X is `randomVal`;
+   * Y ∈ [0, 1] maps to 1× / 2× / 4× / 8×. Not a `LayoutParams` member, so
+   * dragging it never busts the Phase 1 cache.
+   */
+  ditherRamp: SpeedRampPoint[]
+  /**
+   * Per-Cell dither polarity curve. Same X contract as `ditherRamp`; Y ∈ [0, 1]
+   * is original below 0.5 and swapped ink/paper at/above it.
+   */
+  ditherInvertRamp: SpeedRampPoint[]
   /** UI 0–100 weight for invert assignment (base-100 coverage; remainder is original). */
   weightInvert: number
   /** UI 0–100 weight for surreal assignment (base-100 coverage; remainder is original). */
@@ -111,6 +124,16 @@ export type EffectSettings = {
   textureOpacity: number
   /** UI 0–100 weight for halftone assignment (base-100 coverage; remainder is original). */
   halftoneAmount: number
+  /**
+   * Per-Cell halftone dot-grid scale curve. Same X/Y contract as `ditherRamp`:
+   * Y ∈ [0, 1] maps to 1× / 2× / 3× / 6× on the current 6px grid.
+   */
+  halftoneRamp: SpeedRampPoint[]
+  /**
+   * Per-Cell halftone polarity curve. Same X/Y contract as `ditherInvertRamp`
+   * — original below 0.5, white-on-black at/above.
+   */
+  halftoneInvertRamp: SpeedRampPoint[]
   /** UI 0–100 weight for thermal assignment (base-100 coverage; remainder is original). */
   weightThermal: number
   /** UI 0–100 weight for slit-scan assignment (base-100 coverage; remainder is original). */
@@ -162,6 +185,13 @@ export type EffectWorkerInMessage =
        * render.
        */
       speedRamp?: SpeedRampPoint[]
+      /**
+       * Per-Cell scroll direction weights (see `lib/direction-weights.ts`).
+       * Sibling of `offsetY` / `speedRamp`, not `EffectSettings`, for the same
+       * reason: direction only has an effect once `offsetY` is nonzero, so it
+       * must never invalidate a static render.
+       */
+      directionWeights?: DirectionWeights
     }
 
 export type EffectWorkerOutMessage =

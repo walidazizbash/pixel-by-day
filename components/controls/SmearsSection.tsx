@@ -8,7 +8,7 @@ import { Slider } from "@/components/ui/slider"
 import { Switch } from "@/components/ui/switch"
 import { ResetAmountButton } from "@/components/controls/ResetAmountButton"
 import { SMEAR_AMOUNT_DEFAULTS, SMEAR_WEIGHT_DEFAULTS, sliderValue } from "@/components/controls/defaults"
-import { controlField, controlLabel, floatingCard, helperText, sectionTitle, sliderRow, sliderTrackClass, sliderValueReadout } from "@/components/controls/styles"
+import { controlField, controlLabel, floatingCard, sectionTitle, sliderRow, sliderTrackClass, sliderValueReadout } from "@/components/controls/styles"
 import { cn } from "@/lib/utils"
 
 type SmearsSectionProps = {
@@ -138,7 +138,7 @@ export const SmearsSection = memo(function SmearsSection({
       ).map((style) => (
         <div
           key={style.id}
-          className="border-b border-white/5 pb-4 last:border-b-0 last:pb-0"
+          className="border-b border-ink/5 pb-4 last:border-b-0 last:pb-0"
         >
           <div className="flex items-center justify-between gap-4">
             <div className="flex items-center gap-1.5">
@@ -167,7 +167,7 @@ export const SmearsSection = memo(function SmearsSection({
             >
               <div className="flex flex-col gap-3 pt-3">
                 <div className={controlField}>
-                  <span className={helperText}>Amount</span>
+                  <span className={controlLabel}>Amount</span>
                   <div className={sliderRow}>
                     <div
                       className={cn(
@@ -199,8 +199,8 @@ export const SmearsSection = memo(function SmearsSection({
                           aria-hidden
                           className="pointer-events-none absolute inset-x-0 top-[7px] z-0 h-0"
                         >
-                          <span className="absolute left-1/2 top-0 h-2 w-px -translate-x-1/2 -translate-y-1/2 bg-slate-400" />
-                          <span className="absolute left-1/2 top-[8px] -translate-x-1/2 font-footer text-[10px] leading-none tabular-nums text-slate-400">
+                          <span className="absolute left-1/2 top-0 h-2 w-px -translate-x-1/2 -translate-y-1/2 bg-ink/25" />
+                          <span className="absolute left-1/2 top-[8px] -translate-x-1/2 font-footer text-[10px] leading-none tabular-nums text-ink-muted">
                             0
                           </span>
                         </div>
@@ -227,7 +227,7 @@ export const SmearsSection = memo(function SmearsSection({
                   </div>
                 </div>
                 <div className={controlField}>
-                  <span className={helperText}>
+                  <span className={controlLabel}>
                     {style.id === "recursive" ? "Coverage" : "Weight"}
                   </span>
                   <div className={sliderRow}>

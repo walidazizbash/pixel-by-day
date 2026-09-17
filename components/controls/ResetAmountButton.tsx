@@ -16,9 +16,8 @@ export function ResetAmountButton({
     <button
       type="button"
       aria-label={`Reset ${label} to ${defaultValue}`}
-      title="Reset to default"
       onClick={onReset}
-      className="inline-flex size-8 shrink-0 items-center justify-center rounded-md text-slate-400 transition-colors hover:bg-white/5 hover:text-slate-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-400/40"
+      className="inline-flex size-8 shrink-0 items-center justify-center rounded-md text-ink-muted transition-colors hover:bg-ink/10 hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
     >
       <RotateCcw className="size-3.5" strokeWidth={2} aria-hidden />
     </button>

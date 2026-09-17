@@ -1,3 +1,10 @@
+/** Default document title — browser tab, Open Graph, Twitter. */
+export const SITE_TITLE = "Pixel By Day | Generative Pixel Effects"
+
+/** Site tagline — meta description, JSON-LD, OG card, in-app header. */
+export const SITE_TAGLINE =
+  "Distort your images using abstract pixel effects."
+
 function normalizeOrigin(value: string | undefined): string | null {
   if (!value) return null
   const trimmed = value.trim().replace(/\/$/, "")

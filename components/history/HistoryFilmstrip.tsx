@@ -39,7 +39,7 @@ export function HistoryFilmstrip({
         type="button"
         aria-label="Scroll history backward"
         onClick={() => scrollHistory(-HISTORY_SCROLL_STEP)}
-        className="flex shrink-0 cursor-pointer items-center justify-center p-1 text-gray-300 hover:text-white lg:w-full"
+        className="flex shrink-0 cursor-pointer items-center justify-center p-1 text-ink-muted hover:text-ink lg:w-full"
       >
         <ChevronLeft className="h-4 w-4 lg:hidden" />
         <ChevronUp className="hidden h-4 w-4 lg:block" />
@@ -56,9 +56,8 @@ export function HistoryFilmstrip({
               <button
                 type="button"
                 aria-label="Preview this saved result"
-                title="Preview this saved result"
                 onClick={() => openPreview(snapshot)}
-                className="aspect-square w-14 shrink-0 cursor-pointer overflow-hidden rounded-lg border border-white/10 transition-colors hover:border-white/30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-400/40"
+                className="aspect-square w-14 shrink-0 cursor-pointer overflow-hidden rounded-lg border border-ink/15 transition-colors hover:border-accent/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
               >
                 {/* eslint-disable-next-line @next/next/no-img-element -- small local data URL thumbnail, not an optimizable remote asset */}
                 <img
@@ -70,7 +69,6 @@ export function HistoryFilmstrip({
               <button
                 type="button"
                 aria-label="Delete this saved result"
-                title="Delete"
                 onClick={(event) => handleDeleteHistory(snapshot.id, event)}
                 className="absolute -top-1.5 -right-1.5 z-10 flex h-5 w-5 shrink-0 cursor-pointer items-center justify-center rounded-full bg-red-700 text-white shadow-sm hover:bg-red-800 lg:static lg:top-auto lg:right-auto lg:z-auto"
               >
@@ -83,7 +81,7 @@ export function HistoryFilmstrip({
         type="button"
         aria-label="Scroll history forward"
         onClick={() => scrollHistory(HISTORY_SCROLL_STEP)}
-        className="flex shrink-0 cursor-pointer items-center justify-center p-1 text-gray-300 hover:text-white lg:w-full"
+        className="flex shrink-0 cursor-pointer items-center justify-center p-1 text-ink-muted hover:text-ink lg:w-full"
       >
         <ChevronRight className="h-4 w-4 lg:hidden" />
         <ChevronDown className="hidden h-4 w-4 lg:block" />
@@ -91,9 +89,8 @@ export function HistoryFilmstrip({
       <button
         type="button"
         aria-label="Clear all saved results"
-        title="Clear all saved results and free memory"
         onClick={handleClearAllHistory}
-        className="shrink-0 px-1.5 py-1 font-footer text-[10px] uppercase tracking-[0.12em] text-slate-500 transition-colors hover:text-slate-200 lg:w-full lg:px-0 lg:pt-1"
+        className="shrink-0 px-1.5 py-1 font-footer text-[10px] uppercase tracking-[0.12em] text-ink transition-colors hover:text-ink/70 lg:w-full lg:px-0 lg:pt-1"
       >
         Clear all
       </button>

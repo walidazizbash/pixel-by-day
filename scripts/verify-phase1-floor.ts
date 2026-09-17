@@ -32,6 +32,22 @@ function baseSettings(
   return {
     seed: 42,
     weightDither: 100,
+    ditherRamp: [
+      { x: 0, y: 0 },
+      { x: 1, y: 1 },
+    ],
+    ditherInvertRamp: [
+      { x: 0, y: 0 },
+      { x: 1, y: 0 },
+    ],
+    halftoneRamp: [
+      { x: 0, y: 0 },
+      { x: 1, y: 1 },
+    ],
+    halftoneInvertRamp: [
+      { x: 0, y: 0 },
+      { x: 1, y: 0 },
+    ],
     weightInvert: 100,
     weightSurreal: 100,
     weightPixelate: 100,

@@ -13,6 +13,19 @@ import {
   SPEED_RAMP_Y_MIN,
   type SpeedRampPoint,
 } from "@/lib/speed-ramp"
+import {
+  DEFAULT_DITHER_RAMP,
+  DEFAULT_HALFTONE_RAMP,
+  DEFAULT_INVERT_RAMP,
+  DITHER_RAMP_Y_MAX,
+  DITHER_RAMP_Y_MIN,
+  INVERT_RAMP_Y_MAX,
+  INVERT_RAMP_Y_MIN,
+} from "@/lib/dither-ramp"
+import {
+  DEFAULT_DIRECTION_WEIGHTS,
+  type DirectionWeights,
+} from "@/lib/direction-weights"
 
 function clampNum(
   value: unknown,
@@ -74,6 +87,8 @@ export function sanitizeEffectSettings(raw: unknown): EffectSettings | null {
   return {
     seed: clampNum(s.seed, 0, 99999, 0) | 0,
     weightDither: clampNum(s.weightDither, 0, 100, 0),
+    ditherRamp: sanitizeDitherRamp(s.ditherRamp),
+    ditherInvertRamp: sanitizeInvertRamp(s.ditherInvertRamp),
     weightInvert: clampNum(s.weightInvert, 0, 100, 0),
     weightSurreal: clampNum(s.weightSurreal, 0, 100, 0),
     weightPixelate: clampNum(s.weightPixelate, 0, 100, 0),
@@ -102,6 +117,8 @@ export function sanitizeEffectSettings(raw: unknown): EffectSettings | null {
     textureEnabled: asBool(s.textureEnabled, true),
     textureOpacity: clampNum(s.textureOpacity, 0, 1, 1),
     halftoneAmount: clampNum(s.halftoneAmount, 0, 100, 0),
+    halftoneRamp: sanitizeHalftoneRamp(s.halftoneRamp),
+    halftoneInvertRamp: sanitizeInvertRamp(s.halftoneInvertRamp),
     weightThermal: clampNum(s.weightThermal, 0, 100, 0),
     weightSlitScan: clampNum(s.weightSlitScan, 0, 100, 0),
     slitScanAmount: clampNum(s.slitScanAmount, 0, 100, 50),
@@ -118,8 +135,13 @@ export function sanitizeEffectSettings(raw: unknown): EffectSettings | null {
  * `DEFAULT_SPEED_RAMP` (a linear 0×→1× curve), same as a missing/invalid
  * `offsetY` falls back to 0.
  */
-export function sanitizeSpeedRamp(raw: unknown): SpeedRampPoint[] {
-  if (!Array.isArray(raw)) return [...DEFAULT_SPEED_RAMP]
+function sanitizeRampPoints(
+  raw: unknown,
+  yMin: number,
+  yMax: number,
+  fallback: readonly SpeedRampPoint[]
+): SpeedRampPoint[] {
+  if (!Array.isArray(raw)) return [...fallback]
 
   const points: SpeedRampPoint[] = []
   for (const entry of raw) {
@@ -130,13 +152,71 @@ export function sanitizeSpeedRamp(raw: unknown): SpeedRampPoint[] {
     if (!Number.isFinite(x) || !Number.isFinite(y)) continue
     points.push({
       x: clampNum(x, SPEED_RAMP_X_MIN, SPEED_RAMP_X_MAX, SPEED_RAMP_X_MIN),
-      y: clampNum(y, SPEED_RAMP_Y_MIN, SPEED_RAMP_Y_MAX, SPEED_RAMP_Y_MIN),
+      y: clampNum(y, yMin, yMax, yMin),
     })
   }
-  if (points.length < 2) return [...DEFAULT_SPEED_RAMP]
+  if (points.length < 2) return [...fallback]
 
   points.sort((a, b) => a.x - b.x)
   return points
+}
+
+export function sanitizeSpeedRamp(raw: unknown): SpeedRampPoint[] {
+  return sanitizeRampPoints(
+    raw,
+    SPEED_RAMP_Y_MIN,
+    SPEED_RAMP_Y_MAX,
+    DEFAULT_SPEED_RAMP
+  )
+}
+
+/**
+ * Normalize an untrusted `ditherRamp` on `EffectSettings`. Y is [0, 1]
+ * (Bayer scale bins), not the Live Play 0–2× range.
+ */
+export function sanitizeDitherRamp(raw: unknown): SpeedRampPoint[] {
+  return sanitizeRampPoints(
+    raw,
+    DITHER_RAMP_Y_MIN,
+    DITHER_RAMP_Y_MAX,
+    DEFAULT_DITHER_RAMP
+  )
+}
+
+export function sanitizeHalftoneRamp(raw: unknown): SpeedRampPoint[] {
+  return sanitizeRampPoints(
+    raw,
+    DITHER_RAMP_Y_MIN,
+    DITHER_RAMP_Y_MAX,
+    DEFAULT_HALFTONE_RAMP
+  )
+}
+
+export function sanitizeInvertRamp(raw: unknown): SpeedRampPoint[] {
+  return sanitizeRampPoints(
+    raw,
+    INVERT_RAMP_Y_MIN,
+    INVERT_RAMP_Y_MAX,
+    DEFAULT_INVERT_RAMP
+  )
+}
+
+/**
+ * Normalize an untrusted `directionWeights` payload (sibling of `offsetY` /
+ * `speedRamp` on the render message, never part of `EffectSettings` — see
+ * `lib/direction-weights.ts`). Each axis clamps independently and falls back
+ * to `DEFAULT_DIRECTION_WEIGHTS`'s own value, same as a missing/invalid
+ * `offsetY` falls back to 0.
+ */
+export function sanitizeDirectionWeights(raw: unknown): DirectionWeights {
+  if (!raw || typeof raw !== "object") return { ...DEFAULT_DIRECTION_WEIGHTS }
+  const s = raw as Record<string, unknown>
+  return {
+    up: clampNum(s.up, 0, 100, DEFAULT_DIRECTION_WEIGHTS.up),
+    down: clampNum(s.down, 0, 100, DEFAULT_DIRECTION_WEIGHTS.down),
+    left: clampNum(s.left, 0, 100, DEFAULT_DIRECTION_WEIGHTS.left),
+    right: clampNum(s.right, 0, 100, DEFAULT_DIRECTION_WEIGHTS.right),
+  }
 }
 
 /**

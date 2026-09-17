@@ -12,6 +12,12 @@ import { controlField, controlLabel, floatingCard, sectionTitle, sliderRow, slid
 import { cn } from "@/lib/utils"
 
 type LayoutSectionProps = {
+  passes: number
+  passesDrag: number | null
+  rate: number
+  setPasses: Dispatch<SetStateAction<number>>
+  setPassesDrag: Dispatch<SetStateAction<number | null>>
+  setRate: Dispatch<SetStateAction<number>>
   showCellLayout: boolean
   handleShowCellLayoutChange: (checked: boolean) => void
   subdivisionLoops: number
@@ -23,9 +29,18 @@ type LayoutSectionProps = {
 }
 
 /**
- * Cell Pattern: the Phase 1 layout controls plus the debug overlay switch.
+ * Pattern: Repeat pass count/decay plus the Phase 1 layout controls and the
+ * debug overlay switch. Repeat lived in its own top-level card before this
+ * redesign; merged here purely as a presentation/grouping change — no state
+ * moved, no behavior changed.
  */
 export const LayoutSection = memo(function LayoutSection({
+  passes,
+  passesDrag,
+  rate,
+  setPasses,
+  setPassesDrag,
+  setRate,
   showCellLayout,
   handleShowCellLayoutChange,
   subdivisionLoops,
@@ -37,12 +52,106 @@ export const LayoutSection = memo(function LayoutSection({
 }: LayoutSectionProps) {
   return (
     <CollapsibleCallout
-      title="Cell Pattern"
+      title="Pattern"
       className={floatingCard}
       titleClassName={sectionTitle}
       enabled={showCellLayout}
       enabledLabel="Visualizing"
     >
+      <div className={controlField}>
+        <div className="flex items-center gap-1.5">
+          <label htmlFor="pipeline-passes" className={controlLabel}>
+            Repeat
+          </label>
+        </div>
+        <div className={sliderRow}>
+          <div className={cn(sliderTrackClass, "relative")}>
+            <Slider
+              id="pipeline-passes"
+              aria-label="Repeat"
+              className="relative z-10 w-full min-w-0"
+              value={[passesDrag ?? passes]}
+              min={1}
+              max={3}
+              step={0.01}
+              onValueChange={(value) => {
+                const raw = sliderValue(value, CONTROL_DEFAULTS.passes)
+                setPassesDrag(raw)
+                setPasses(Math.max(1, Math.min(3, Math.round(raw))))
+              }}
+              onValueCommitted={(value) => {
+                const raw = sliderValue(value, CONTROL_DEFAULTS.passes)
+                setPasses(Math.max(1, Math.min(3, Math.round(raw))))
+                setPassesDrag(null)
+              }}
+            />
+            {/* Integer stop ticks (1 / 2 / 3) — ends sit at the track tips */}
+            <div
+              aria-hidden
+              className="pointer-events-none absolute inset-x-0 top-1/2 z-0 h-0"
+            >
+              {[0, 50, 100].map((pct) => (
+                <span
+                  key={pct}
+                  className={cn(
+                    "absolute top-0 h-1.5 w-px -translate-y-1/2 bg-ink/25",
+                    pct === 0
+                      ? "left-0"
+                      : pct === 100
+                        ? "right-0"
+                        : "left-1/2 -translate-x-1/2"
+                  )}
+                />
+              ))}
+            </div>
+          </div>
+          <div className="flex shrink-0 items-center gap-0.5">
+            <span className={sliderValueReadout} aria-hidden="true">
+              {passes}
+            </span>
+            <ResetAmountButton
+              label="Repeat"
+              defaultValue={CONTROL_DEFAULTS.passes}
+              onReset={() => {
+                setPasses(CONTROL_DEFAULTS.passes)
+                setPassesDrag(null)
+              }}
+            />
+          </div>
+        </div>
+      </div>
+      <div className={controlField}>
+        <div className="flex items-center gap-1.5">
+          <label htmlFor="pipeline-rate" className={controlLabel}>
+            Repeat Strength
+          </label>
+        </div>
+        <div className={sliderRow}>
+          <Slider
+            id="pipeline-rate"
+            aria-label="Repeat Strength"
+            className={sliderTrackClass}
+            value={[rate]}
+            min={0}
+            max={100}
+            step={1}
+            onValueChange={(value) =>
+              setRate(sliderValue(value, CONTROL_DEFAULTS.rate))
+            }
+          />
+          <div className="flex shrink-0 items-center gap-0.5">
+            <span className={sliderValueReadout} aria-hidden="true">
+              {rate}
+            </span>
+            <ResetAmountButton
+              label="Repeat Strength"
+              defaultValue={CONTROL_DEFAULTS.rate}
+              onReset={() => setRate(CONTROL_DEFAULTS.rate)}
+            />
+          </div>
+        </div>
+      </div>
+
       <div className="flex items-center justify-between gap-4">
         <div className="flex items-center gap-1.5">
           <label htmlFor="show-cell-layout" className={controlLabel}>
@@ -61,7 +170,7 @@ export const LayoutSection = memo(function LayoutSection({
         <div
           role="group"
           aria-label="Mode"
-          className="inline-flex rounded-lg border border-white/10 bg-slate-950/40 p-0.5"
+          className="inline-flex rounded-lg border border-ink/15 bg-surface-strong p-0.5"
         >
           {(
             [
@@ -78,9 +187,7 @@ export const LayoutSection = memo(function LayoutSection({
                 onClick={() => setSubdivisionMode(option.id)}
                 className={cn(
                   "rounded-md px-2.5 py-1 text-xs font-medium transition-colors",
-                  active
-                    ? "bg-slate-200 text-slate-950"
-                    : "text-slate-300 hover:text-slate-100"
+                  active ? "bg-accent text-ink" : "text-ink hover:bg-ink/10"
                 )}
               >
                 {option.label}

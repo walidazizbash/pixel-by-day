@@ -41,6 +41,22 @@ function makeSettings(overrides: Partial<EffectSettings> = {}): EffectSettings {
   return {
     seed: 42,
     weightDither: 0,
+    ditherRamp: [
+      { x: 0, y: 0 },
+      { x: 1, y: 1 },
+    ],
+    ditherInvertRamp: [
+      { x: 0, y: 0 },
+      { x: 1, y: 0 },
+    ],
+    halftoneRamp: [
+      { x: 0, y: 0 },
+      { x: 1, y: 1 },
+    ],
+    halftoneInvertRamp: [
+      { x: 0, y: 0 },
+      { x: 1, y: 0 },
+    ],
     weightInvert: 0,
     weightSurreal: 0,
     weightPixelate: 0,

@@ -40,3 +40,16 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+# Playwright CLI output (may contain credentials)
+.playwright-cli/
+
+# graphify knowledge-graph output (generated cache/analysis, regenerate locally)
+/graphify-out/
+
+# local/tool-specific agent config - not needed to run or build the project
+.mcp.json
+.agents/
+.vscode/
+skills-lock.json
+.claude/settings.json
+.claude/skills/

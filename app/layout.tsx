@@ -1,6 +1,11 @@
 import type { Metadata, Viewport } from "next"
 import { Geist, Geist_Mono } from "next/font/google"
-import { getSiteUrl, isSearchIndexable } from "@/lib/site"
+import {
+  getSiteUrl,
+  isSearchIndexable,
+  SITE_TAGLINE,
+  SITE_TITLE,
+} from "@/lib/site"
 import "./globals.css"
 
 const geistSans = Geist({
@@ -16,25 +21,22 @@ const geistMono = Geist_Mono({
 const siteUrl = getSiteUrl()
 const searchIndexable = isSearchIndexable()
 
-const title = "Pixel By Day | Generative Pixel Effects"
-const description = "Distort your images using abstract pixel effects."
-
 export const viewport: Viewport = {
   width: "device-width",
   initialScale: 1,
   // Explicitly allow pinch / accessibility zoom (never set maximumScale or userScalable: false).
   userScalable: true,
-  themeColor: "#08080a",
+  themeColor: "#0a0a0d",
   viewportFit: "cover",
 }
 
 export const metadata: Metadata = {
   metadataBase: new URL(siteUrl),
   title: {
-    default: title,
+    default: SITE_TITLE,
     template: "%s · Pixel By Day",
   },
-  description,
+  description: SITE_TAGLINE,
   keywords: [
     "Generative Art",
     "Pixel Art",
@@ -87,8 +89,8 @@ export const metadata: Metadata = {
     canonical: "/",
   },
   openGraph: {
-    title,
-    description,
+    title: SITE_TITLE,
+    description: SITE_TAGLINE,
     type: "website",
     locale: "en_US",
     siteName: "Pixel By Day",
@@ -98,14 +100,14 @@ export const metadata: Metadata = {
         url: "/opengraph-image",
         width: 1200,
         height: 630,
-        alt: title,
+        alt: SITE_TITLE,
       },
     ],
   },
   twitter: {
     card: "summary_large_image",
-    title,
-    description,
+    title: SITE_TITLE,
+    description: SITE_TAGLINE,
     images: ["/twitter-image"],
   },
   formatDetection: {
@@ -119,7 +121,7 @@ const jsonLd = {
   "@context": "https://schema.org",
   "@type": "WebApplication",
   name: "Pixel By Day",
-  description,
+  description: SITE_TAGLINE,
   url: siteUrl,
   applicationCategory: "DesignApplication",
   operatingSystem: "Any",

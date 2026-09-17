@@ -16,6 +16,7 @@
 import type {
   CachedLayout,
   CachedCell,
+  DirectionWeights,
   EffectName,
   EffectSettings,
   EffectWorkerInMessage,
@@ -31,13 +32,27 @@ import {
 } from "@/lib/phase1-floor"
 import { applySmearStyles } from "@/lib/smear-styles"
 import { applyTexture } from "@/lib/texture-styles"
-import { sanitizeEffectSettings, sanitizeSpeedRamp } from "@/lib/validate-settings"
+import {
+  cellDitherScaleFromRamp,
+  cellHalftoneScaleFromRamp,
+  cellInvertedFromRamp,
+} from "@/lib/dither-ramp"
+import {
+  sanitizeDirectionWeights,
+  sanitizeEffectSettings,
+  sanitizeSpeedRamp,
+} from "@/lib/validate-settings"
 import {
   cellRampPosition,
   evaluateSpeedRamp,
   uniformSpeedRampValue,
   DEFAULT_SPEED_RAMP,
 } from "@/lib/speed-ramp"
+import {
+  chooseDirection,
+  DEFAULT_DIRECTION_WEIGHTS,
+  type Direction,
+} from "@/lib/direction-weights"
 import {
   buildBaseColorMasters,
   masterForName,
@@ -395,6 +410,24 @@ function wrapOffset(offsetY: number, period: number): number {
 }
 
 /**
+ * `wrapOffset`'s magnitude, signed for the Cell's assigned direction.
+ * `forward` is Down (on the Y axis) or Right (on the X axis) — the polarity
+ * `paintCell`'s wraparound copy already implements, where content at row/col
+ * `r` lands at `(r + scroll) mod period`. Up/Left travel the same distance
+ * the opposite way, which is the complementary point in the same period:
+ * moving back by `d` is moving forward by `period - d`.
+ */
+function resolveDirectionalScroll(
+  distance: number,
+  period: number,
+  forward: boolean
+): number {
+  const wrapped = wrapOffset(distance, period)
+  if (forward || wrapped === 0) return wrapped
+  return period - wrapped
+}
+
+/**
  * Cell-specific multiplier on the shared Live Play offset — a Houdini
  * Attribute-Randomize-style ramp. Each Cell's fixed, deterministic position
  * along the ramp's X axis (`cellRampPosition`, independent of `randomVal` —
@@ -411,9 +444,12 @@ function cellSpeedMultiplier(
 /**
  * One Cell's worth of Phase 2 work: copy the Color Master window → smear →
  * texture. The Cell rectangle never moves; `scroll` rotates its *contents*
- * downward and wraps them inside it, so the sample window is read as two
- * bands — the bottom `scroll` rows come around to the top, and the rest
- * follow beneath them. A `scroll` of 0 is the plain static copy.
+ * along `axis` and wraps them inside it, so the sample window is read as two
+ * bands along that axis — the trailing `scroll` rows/columns come around to
+ * the leading edge, and the rest follow after them. A `scroll` of 0 is the
+ * plain static copy. Polarity (which edge is "trailing") is already baked
+ * into `scroll` by `resolveDirectionalScroll` — this function only needs to
+ * know which axis it runs along.
  *
  * The smear always holds at the Cell's edges (`clamp`) rather than wrapping
  * with the contents, so it re-forms every frame as pixels scroll through —
@@ -424,6 +460,7 @@ function paintCell(
   master: Uint8ClampedArray,
   cell: CachedCell,
   scroll: number,
+  axis: "x" | "y",
   effect: EffectName,
   settings: EffectSettings,
   width: number,
@@ -439,30 +476,57 @@ function paintCell(
     height
   )
 
-  if (scroll > 0) {
+  if (axis === "y") {
+    if (scroll > 0) {
+      copyContinuousCellSample(
+        master,
+        dest,
+        width,
+        sampleX,
+        sampleY + cell.height - scroll,
+        cell.x,
+        cell.y,
+        cell.width,
+        scroll
+      )
+    }
     copyContinuousCellSample(
       master,
       dest,
       width,
       sampleX,
-      sampleY + cell.height - scroll,
+      sampleY,
       cell.x,
-      cell.y,
+      cell.y + scroll,
       cell.width,
-      scroll
+      cell.height - scroll
+    )
+  } else {
+    if (scroll > 0) {
+      copyContinuousCellSample(
+        master,
+        dest,
+        width,
+        sampleX + cell.width - scroll,
+        sampleY,
+        cell.x,
+        cell.y,
+        scroll,
+        cell.height
+      )
+    }
+    copyContinuousCellSample(
+      master,
+      dest,
+      width,
+      sampleX,
+      sampleY,
+      cell.x + scroll,
+      cell.y,
+      cell.width - scroll,
+      cell.height
     )
   }
-  copyContinuousCellSample(
-    master,
-    dest,
-    width,
-    sampleX,
-    sampleY,
-    cell.x,
-    cell.y + scroll,
-    cell.width,
-    cell.height - scroll
-  )
 
   applySmearStyles(dest, width, height, cell, settings, decay, dest, "clamp")
   if (isTextureEffect(effect)) {
@@ -474,9 +538,27 @@ function paintCell(
       cell.x,
       cell.y,
       cell.width,
-      cell.height
+      cell.height,
+      cellDitherScaleFromRamp(settings.ditherRamp, cell.randomVal),
+      cellHalftoneScaleFromRamp(settings.halftoneRamp, cell.randomVal),
+      cellInvertedFromRamp(settings.ditherInvertRamp, cell.randomVal),
+      cellInvertedFromRamp(settings.halftoneInvertRamp, cell.randomVal)
     )
   }
+}
+
+/** Which axis / polarity each Cell direction scrolls along — see `paintCell`. */
+const DIRECTION_AXIS: Record<Direction, "x" | "y"> = {
+  up: "y",
+  down: "y",
+  left: "x",
+  right: "x",
+}
+const DIRECTION_FORWARD: Record<Direction, boolean> = {
+  up: false,
+  down: true,
+  left: false,
+  right: true,
 }
 
 /**
@@ -485,8 +567,8 @@ function paintCell(
  *
  * Live Play never touches Phase 1: the layout, the mask, the effect assignment
  * and the smear roll are exactly what a static frame would use. All that
- * animates is the contents of each Cell, scrolling downward and wrapping at
- * that Cell's own borders.
+ * animates is the contents of each Cell, scrolling along its assigned
+ * direction (`chooseDirection`) and wrapping at that Cell's own borders.
  */
 function applyHybridCells(
   dest: Uint8ClampedArray,
@@ -498,6 +580,7 @@ function applyHybridCells(
   decay: number,
   offsetY: number,
   speedRamp: readonly SpeedRampPoint[],
+  directionWeights: DirectionWeights,
   jobId?: number
 ) {
   const cells = layout.cells
@@ -515,10 +598,29 @@ function applyHybridCells(
     const effect = chooseEffect(cell.randomVal, settings)
     const master = masterForName(masters, colorMasterForEffect(effect))
     const multiplier = uniformSpeed ?? cellSpeedMultiplier(cell, speedRamp)
-    const cellOffsetY = offsetY * multiplier
-    const scroll = wrapOffset(cellOffsetY, cell.height)
+    const cellTravel = offsetY * multiplier
 
-    paintCell(dest, master, cell, scroll, effect, settings, width, height, decay)
+    const direction = chooseDirection(cell.randomVal, directionWeights)
+    const axis = DIRECTION_AXIS[direction]
+    const period = axis === "y" ? cell.height : cell.width
+    const scroll = resolveDirectionalScroll(
+      cellTravel,
+      period,
+      DIRECTION_FORWARD[direction]
+    )
+
+    paintCell(
+      dest,
+      master,
+      cell,
+      scroll,
+      axis,
+      effect,
+      settings,
+      width,
+      height,
+      decay
+    )
   }
 }
 
@@ -536,6 +638,7 @@ function drawNormalEffects(
   height: number,
   offsetY = 0,
   speedRamp: readonly SpeedRampPoint[] = DEFAULT_SPEED_RAMP,
+  directionWeights: DirectionWeights = DEFAULT_DIRECTION_WEIGHTS,
   jobId?: number
 ) {
   throwIfStale(jobId)
@@ -605,6 +708,7 @@ function drawNormalEffects(
       decay,
       offsetY,
       speedRamp,
+      directionWeights,
       jobId
     )
   }
@@ -620,6 +724,7 @@ function drawComposite(
   height: number,
   offsetY = 0,
   speedRamp: readonly SpeedRampPoint[] = DEFAULT_SPEED_RAMP,
+  directionWeights: DirectionWeights = DEFAULT_DIRECTION_WEIGHTS,
   jobId?: number
 ) {
   if (settings.showCellLayout) {
@@ -632,7 +737,17 @@ function drawComposite(
     return
   }
 
-  drawNormalEffects(ctx, layout, settings, width, height, offsetY, speedRamp, jobId)
+  drawNormalEffects(
+    ctx,
+    layout,
+    settings,
+    width,
+    height,
+    offsetY,
+    speedRamp,
+    directionWeights,
+    jobId
+  )
 }
 
 function compositeCells(
@@ -642,10 +757,21 @@ function compositeCells(
   height: number,
   offsetY: number,
   speedRamp: readonly SpeedRampPoint[],
+  directionWeights: DirectionWeights,
   jobId?: number
 ): ImageBitmap {
   const ctx = ensureWorkSurface(width, height)
-  drawComposite(ctx, layout, settings, width, height, offsetY, speedRamp, jobId)
+  drawComposite(
+    ctx,
+    layout,
+    settings,
+    width,
+    height,
+    offsetY,
+    speedRamp,
+    directionWeights,
+    jobId
+  )
 
   const bitmap = workCanvas!.transferToImageBitmap()
   workCanvas = null
@@ -674,7 +800,8 @@ function renderFrame(
   jobId: number,
   settings: EffectSettings,
   offsetY: number,
-  speedRamp: readonly SpeedRampPoint[]
+  speedRamp: readonly SpeedRampPoint[],
+  directionWeights: DirectionWeights
 ) {
   if (!cachedSource || !baseMasters) {
     post({ type: "error", jobId, message: "No source image cached in worker" })
@@ -699,6 +826,7 @@ function renderFrame(
       height,
       offsetY,
       speedRamp,
+      directionWeights,
       jobId
     )
   } catch (err) {
@@ -738,6 +866,7 @@ let queuedRender: {
   settings: EffectSettings
   offsetY: number
   speedRamp: SpeedRampPoint[]
+  directionWeights: DirectionWeights
 } | null = null
 
 function pumpRenders() {
@@ -748,7 +877,13 @@ function pumpRenders() {
       const job = queuedRender
       queuedRender = null
       if (job.jobId !== activeJobId) continue
-      renderFrame(job.jobId, job.settings, job.offsetY, job.speedRamp)
+      renderFrame(
+        job.jobId,
+        job.settings,
+        job.offsetY,
+        job.speedRamp,
+        job.directionWeights
+      )
     }
   } finally {
     renderPumpRunning = false
@@ -813,8 +948,15 @@ self.onmessage = (event: MessageEvent<EffectWorkerInMessage>) => {
         ? msg.offsetY
         : 0
     const speedRamp = sanitizeSpeedRamp(msg.speedRamp)
+    const directionWeights = sanitizeDirectionWeights(msg.directionWeights)
     activeJobId = msg.jobId
-    queuedRender = { jobId: msg.jobId, settings, offsetY, speedRamp }
+    queuedRender = {
+      jobId: msg.jobId,
+      settings,
+      offsetY,
+      speedRamp,
+      directionWeights,
+    }
     pumpRenders()
     return
   }

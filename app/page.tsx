@@ -11,6 +11,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react"
 import type {
+  DirectionWeights,
   EffectSettings,
   SlitScanMode,
   SmearStyleSettings,
@@ -24,7 +25,6 @@ import { BaseEffectsSection } from "@/components/controls/BaseEffectsSection"
 import { LayoutSection } from "@/components/controls/LayoutSection"
 import { NoiseMaskSection } from "@/components/controls/NoiseMaskSection"
 import { PostProcessingSection } from "@/components/controls/PostProcessingSection"
-import { RepeatSection } from "@/components/controls/RepeatSection"
 import { SmearsSection } from "@/components/controls/SmearsSection"
 import { HistoryFilmstrip } from "@/components/history/HistoryFilmstrip"
 import type { HistorySnapshot } from "@/components/history/types"
@@ -44,6 +44,12 @@ import {
 } from "@/components/controls/styles"
 import { MAX_DECODE_EDGE, MAX_DECODE_PIXELS } from "@/lib/constants"
 import { DEFAULT_SPEED_RAMP } from "@/lib/speed-ramp"
+import {
+  DEFAULT_DITHER_RAMP,
+  DEFAULT_HALFTONE_RAMP,
+  DEFAULT_INVERT_RAMP,
+} from "@/lib/dither-ramp"
+import { DEFAULT_DIRECTION_WEIGHTS } from "@/lib/direction-weights"
 import { useAppWorkers } from "@/hooks/useAppWorkers"
 import { cn } from "@/lib/utils"
 
@@ -97,6 +103,8 @@ const RANDOM_RANGES = {
   slitScanFrequency: { min: 15, max: 75 },
   randomSampleChance: 0.35,
   subdivisionModeFrontierChance: 0.5,
+  /** Each of Up/Down/Left/Right rolls independently — see `randomDirectionWeights`. */
+  directionWeight: { min: 0, max: 100 },
 } as const
 
 function randomPasses() {
@@ -122,6 +130,17 @@ function randomSignedSmearAmount() {
   const mag = randomSmearAmount()
   if (mag === 0) return 0
   return Math.random() < 0.5 ? -mag : mag
+}
+
+/** Up/Down/Left/Right each roll independently in [0, 100] — no exclusivity between axes. */
+function randomDirectionWeights(): DirectionWeights {
+  const { min, max } = RANDOM_RANGES.directionWeight
+  return {
+    up: randInt(min, max),
+    down: randInt(min, max),
+    left: randInt(min, max),
+    right: randInt(min, max),
+  }
 }
 
 function defaultSmear(enabled: boolean, amount = 50): SmearStyleSettings {
@@ -179,6 +198,13 @@ function cloneEffectSettings(settings: EffectSettings): EffectSettings {
     smearDiagonal1: { ...settings.smearDiagonal1 },
     smearDiagonal2: { ...settings.smearDiagonal2 },
     smearRecursive: { ...settings.smearRecursive },
+    ditherRamp: settings.ditherRamp.map((p) => ({ x: p.x, y: p.y })),
+    ditherInvertRamp: settings.ditherInvertRamp.map((p) => ({ x: p.x, y: p.y })),
+    halftoneRamp: settings.halftoneRamp.map((p) => ({ x: p.x, y: p.y })),
+    halftoneInvertRamp: settings.halftoneInvertRamp.map((p) => ({
+      x: p.x,
+      y: p.y,
+    })),
   }
 }
 
@@ -186,10 +212,18 @@ function cloneSpeedRamp(points: readonly SpeedRampPoint[]): SpeedRampPoint[] {
   return points.map((p) => ({ x: p.x, y: p.y }))
 }
 
+function cloneDirectionWeights(weights: DirectionWeights): DirectionWeights {
+  return { ...weights }
+}
+
 function buildDefaultEffectSettings(): EffectSettings {
   return {
     seed: DEFAULT_SEED,
     weightDither: CONTROL_DEFAULTS.weightDither,
+    ditherRamp: [...DEFAULT_DITHER_RAMP],
+    ditherInvertRamp: [...DEFAULT_INVERT_RAMP],
+    halftoneRamp: [...DEFAULT_HALFTONE_RAMP],
+    halftoneInvertRamp: [...DEFAULT_INVERT_RAMP],
     weightInvert: CONTROL_DEFAULTS.weightInvert,
     weightSurreal: CONTROL_DEFAULTS.weightSurreal,
     weightPixelate: CONTROL_DEFAULTS.weightPixelate,
@@ -274,6 +308,10 @@ function buildNeutralEffectSettings(current: EffectSettings): EffectSettings {
     // most bakes onto 99999 in the worker while the Seed field showed something else.
     seed: randInt(RANDOM_RANGES.seed.min, RANDOM_RANGES.seed.max),
     weightDither: 0,
+    ditherRamp: [...DEFAULT_DITHER_RAMP],
+    ditherInvertRamp: [...DEFAULT_INVERT_RAMP],
+    halftoneRamp: [...DEFAULT_HALFTONE_RAMP],
+    halftoneInvertRamp: [...DEFAULT_INVERT_RAMP],
     weightInvert: 0,
     weightSurreal: 0,
     weightPixelate: 0,
@@ -333,6 +371,10 @@ function buildToolbarResetSettings(current: EffectSettings): EffectSettings {
   return {
     ...current,
     weightDither: 0,
+    ditherRamp: [...DEFAULT_DITHER_RAMP],
+    ditherInvertRamp: [...DEFAULT_INVERT_RAMP],
+    halftoneRamp: [...DEFAULT_HALFTONE_RAMP],
+    halftoneInvertRamp: [...DEFAULT_INVERT_RAMP],
     weightInvert: 0,
     weightSurreal: 0,
     weightPixelate: 0,
@@ -391,6 +433,29 @@ function prepareCanvasPreview(
   if (ctx) {
     ctx.drawImage(source, 0, 0, width, height)
   }
+}
+
+/** Pixels the control rail's edge fade tapers over — see `controlRailFade`. */
+const CONTROL_RAIL_FADE_SIZE = "40px"
+
+/**
+ * The control rail's edge-fade mask, built only for the edges that actually
+ * have more content scrolled out of view. Not fading an edge means no
+ * mask-image at all there (fully opaque), rather than a gradient that starts
+ * and ends at the same opaque color — so a rail that isn't scrollable in a
+ * direction never dims at rest.
+ */
+function controlRailMaskImage(fade: { top: boolean; bottom: boolean }) {
+  if (fade.top && fade.bottom) {
+    return `linear-gradient(to bottom, transparent, black ${CONTROL_RAIL_FADE_SIZE}, black calc(100% - ${CONTROL_RAIL_FADE_SIZE}), transparent)`
+  }
+  if (fade.top) {
+    return `linear-gradient(to bottom, transparent, black ${CONTROL_RAIL_FADE_SIZE})`
+  }
+  if (fade.bottom) {
+    return `linear-gradient(to bottom, black calc(100% - ${CONTROL_RAIL_FADE_SIZE}), transparent)`
+  }
+  return undefined
 }
 
 export default function Home() {
@@ -456,6 +521,18 @@ export default function Home() {
   const [weightDither, setWeightDither] = useState<number>(
     CONTROL_DEFAULTS.weightDither
   )
+  const [ditherRamp, setDitherRamp] = useState<SpeedRampPoint[]>([
+    ...DEFAULT_DITHER_RAMP,
+  ])
+  const [ditherInvertRamp, setDitherInvertRamp] = useState<SpeedRampPoint[]>([
+    ...DEFAULT_INVERT_RAMP,
+  ])
+  const [halftoneRamp, setHalftoneRamp] = useState<SpeedRampPoint[]>([
+    ...DEFAULT_HALFTONE_RAMP,
+  ])
+  const [halftoneInvertRamp, setHalftoneInvertRamp] = useState<SpeedRampPoint[]>([
+    ...DEFAULT_INVERT_RAMP,
+  ])
   const [weightInvert, setWeightInvert] = useState<number>(
     CONTROL_DEFAULTS.weightInvert
   )
@@ -512,6 +589,9 @@ export default function Home() {
   const [backupSpeedRamp, setBackupSpeedRamp] = useState<SpeedRampPoint[] | null>(
     null
   )
+  /** Direction weights stashed with `backupSettings` for History Cancel — not in EffectSettings. */
+  const [backupDirectionWeights, setBackupDirectionWeights] =
+    useState<DirectionWeights | null>(null)
   const previewing = previewItem !== null
   /** Live Play on/off. The offset itself never enters state — see the rAF loop below. */
   const [isPlaying, setIsPlaying] = useState(false)
@@ -564,9 +644,59 @@ export default function Home() {
   const [speedRamp, setSpeedRamp] = useState<SpeedRampPoint[]>([
     ...DEFAULT_SPEED_RAMP,
   ])
+  /**
+   * Live Play per-Cell scroll direction: each Cell's stable `randomVal` picks
+   * one of Up / Down / Left / Right via the same base-100 weighted bucket
+   * logic as Effects and Smears (`chooseDirection`, see
+   * `lib/direction-weights.ts`). Sibling of `speedRamp`, not `EffectSettings`.
+   */
+  const [directionWeights, setDirectionWeights] = useState<DirectionWeights>({
+    ...DEFAULT_DIRECTION_WEIGHTS,
+  })
   const fileInputRef = useRef<HTMLInputElement>(null)
   const liveCanvasRef = useRef<HTMLCanvasElement>(null)
   const historyScrollRef = useRef<HTMLDivElement>(null)
+  const controlRailRef = useRef<HTMLElement>(null)
+  /**
+   * Which edges of the control rail currently have more content scrolled out
+   * of view — drives the mask-image fade below. Recomputed on scroll and on
+   * any size change (a section expanding/collapsing, or the viewport itself
+   * resizing), not just once on mount, so the fade never lingers at rest when
+   * there's nothing left to scroll to, and appears as soon as there is.
+   */
+  const [controlRailFade, setControlRailFade] = useState({
+    top: false,
+    bottom: false,
+  })
+
+  useEffect(() => {
+    const el = controlRailRef.current
+    if (!el) return
+
+    function updateFade() {
+      const { scrollTop, scrollHeight, clientHeight } = el!
+      setControlRailFade({
+        top: scrollTop > 1,
+        bottom: scrollTop + clientHeight < scrollHeight - 1,
+      })
+    }
+
+    updateFade()
+    el.addEventListener("scroll", updateFade, { passive: true })
+
+    // Catches content growth/shrink (a callout expanding) and viewport
+    // resizing — neither fires a `scroll` event on its own.
+    const resizeObserver = new ResizeObserver(updateFade)
+    resizeObserver.observe(el)
+    for (const child of el.children) {
+      resizeObserver.observe(child)
+    }
+
+    return () => {
+      el.removeEventListener("scroll", updateFade)
+      resizeObserver.disconnect()
+    }
+  }, [])
 
   function scrollHistory(delta: number) {
     const el = historyScrollRef.current
@@ -587,6 +717,10 @@ export default function Home() {
   const effectSettings: EffectSettings = {
     seed,
     weightDither,
+    ditherRamp,
+    ditherInvertRamp,
+    halftoneRamp,
+    halftoneInvertRamp,
     weightInvert,
     weightSurreal,
     weightPixelate,
@@ -650,6 +784,12 @@ export default function Home() {
     setRecursiveWeight(next.recursiveWeight)
     setWeightOriginal(next.weightOriginal)
     setWeightDither(next.weightDither)
+    setDitherRamp(next.ditherRamp.map((p) => ({ x: p.x, y: p.y })))
+    setDitherInvertRamp(next.ditherInvertRamp.map((p) => ({ x: p.x, y: p.y })))
+    setHalftoneRamp(next.halftoneRamp.map((p) => ({ x: p.x, y: p.y })))
+    setHalftoneInvertRamp(
+      next.halftoneInvertRamp.map((p) => ({ x: p.x, y: p.y }))
+    )
     setWeightInvert(next.weightInvert)
     setWeightSurreal(next.weightSurreal)
     setWeightPixelate(next.weightPixelate)
@@ -725,6 +865,13 @@ export default function Home() {
       recursiveWeight: randInt(R.smearWeight.min, R.smearWeight.max),
       weightOriginal: randInt(R.weightOriginal.min, R.weightOriginal.max),
       weightDither: randInt(R.weightDither.min, R.weightDither.max),
+      ditherRamp: base.ditherRamp.map((p) => ({ x: p.x, y: p.y })),
+      ditherInvertRamp: base.ditherInvertRamp.map((p) => ({ x: p.x, y: p.y })),
+      halftoneRamp: base.halftoneRamp.map((p) => ({ x: p.x, y: p.y })),
+      halftoneInvertRamp: base.halftoneInvertRamp.map((p) => ({
+        x: p.x,
+        y: p.y,
+      })),
       weightInvert: randInt(R.weightInvert.min, R.weightInvert.max),
       weightSurreal: randInt(R.weightSurreal.min, R.weightSurreal.max),
       weightPixelate: randInt(R.weightPixelate.min, R.weightPixelate.max),
@@ -788,6 +935,7 @@ export default function Home() {
       // that `openPreview`'s settings swap would otherwise kick off are never seen.
       paused: previewing,
       speedRamp,
+      directionWeights,
       onPreviewFrame,
       onSourcePreview,
     })
@@ -892,6 +1040,11 @@ export default function Home() {
     const newSettings = cloneEffectSettings(buildRandomPhase12Settings(effectSettings))
     commitAutoFillHistory([newSettings])
     applyPhase12Settings(newSettings)
+    // Direction weights are a Live Play–only sibling of speedRamp, not part of
+    // EffectSettings (see lib/direction-weights.ts), so they roll here rather
+    // than inside buildRandomPhase12Settings — same reason Previous/Next Random
+    // already leave speedRamp alone: neither lives in the undo/redo stack.
+    setDirectionWeights(randomDirectionWeights())
   }
 
   function handleAutoFillBack() {
@@ -941,6 +1094,7 @@ export default function Home() {
     // cursor which can already be one+ frames ahead while a job is in flight.
     const capturedOffsetY = getPaintedLiveOffsetY()
     const capturedSpeedRamp = cloneSpeedRamp(speedRamp)
+    const capturedDirectionWeights = cloneDirectionWeights(directionWeights)
     const previewedId = previewItem?.id
 
     // Preview-size capture (already capped at MAX_PREVIEW_DIMENSION), kept as a
@@ -956,6 +1110,7 @@ export default function Home() {
           effectSettings: capturedSettings,
           offsetY: capturedOffsetY,
           speedRamp: capturedSpeedRamp,
+          directionWeights: capturedDirectionWeights,
         }
         setVisualHistory((prev) =>
           capVisualHistory([snapshot, ...prev], previewedId)
@@ -1016,12 +1171,14 @@ export default function Home() {
     if (!previewing) {
       setBackupSettings(cloneEffectSettings(effectSettings))
       setBackupSpeedRamp(cloneSpeedRamp(speedRamp))
+      setBackupDirectionWeights(cloneDirectionWeights(directionWeights))
     }
     // Live Play stays paused after the modal closes too — Restore and Cancel
     // both leave `isPlaying` alone, so resuming is always a deliberate Play click.
     setIsPlaying(false)
     applyFullEffectSettings(snapshot.effectSettings)
     setSpeedRamp(cloneSpeedRamp(snapshot.speedRamp))
+    setDirectionWeights(cloneDirectionWeights(snapshot.directionWeights))
     setPreviewItem(snapshot)
     // Switching the pin from A to B must evict A if it was only kept as the extra slot.
     setVisualHistory((prev) => capVisualHistory(prev, snapshot.id))
@@ -1030,8 +1187,12 @@ export default function Home() {
   /** Restore the previewed snapshot: load its image, scroll, and speed ramp as the live working state. */
   function handleRestore() {
     if (!previewItem) return
-    const { imageSrc: restoredSrc, offsetY, speedRamp: restoredRamp } =
-      previewItem
+    const {
+      imageSrc: restoredSrc,
+      offsetY,
+      speedRamp: restoredRamp,
+      directionWeights: restoredDirectionWeights,
+    } = previewItem
     setVisualHistory((prev) => capVisualHistory(prev, undefined))
     setImageSrc(restoredSrc)
     // The snapshot's settings and ramp went live back in `openPreview`, so
@@ -1040,7 +1201,9 @@ export default function Home() {
     // watches and cost a redundant worker render.
     setBackupSettings(null)
     setBackupSpeedRamp(null)
+    setBackupDirectionWeights(null)
     setSpeedRamp(cloneSpeedRamp(restoredRamp))
+    setDirectionWeights(cloneDirectionWeights(restoredDirectionWeights))
     // Both refs the offset lives in: the hook's, which the next dispatch reads
     // when this same click flips `paused` false and forces that render; and the
     // page's own, so a later Play resumes the scroll from here instead of from
@@ -1101,6 +1264,7 @@ export default function Home() {
       livePlayOffsetRef.current = 0
       setLiveOffsetY(0)
       setSpeedRamp([...DEFAULT_SPEED_RAMP])
+      setDirectionWeights({ ...DEFAULT_DIRECTION_WEIGHTS })
       setLivePlaySpeed(LIVE_PLAY_SPEED.default)
       livePlaySpeedRef.current = LIVE_PLAY_SPEED.default
       // Seed Random's undo stack with what actually went live, or stepping back would
@@ -1188,11 +1352,20 @@ export default function Home() {
     if (backupSpeedRamp) {
       setSpeedRamp(cloneSpeedRamp(backupSpeedRamp))
     }
+    if (backupDirectionWeights) {
+      setDirectionWeights(cloneDirectionWeights(backupDirectionWeights))
+    }
     setBackupSettings(null)
     setBackupSpeedRamp(null)
+    setBackupDirectionWeights(null)
     setPreviewItem(null)
     setVisualHistory((prev) => capVisualHistory(prev, undefined))
-  }, [backupSettings, backupSpeedRamp, applyFullEffectSettings])
+  }, [
+    backupSettings,
+    backupSpeedRamp,
+    backupDirectionWeights,
+    applyFullEffectSettings,
+  ])
 
   /**
    * Escape dismisses the History preview modal, same as the backdrop or Cancel.
@@ -1258,22 +1431,49 @@ export default function Home() {
   }
 
   return (
-    <div className="flex h-dvh flex-col overflow-hidden bg-[radial-gradient(ellipse_at_top_left,_var(--tw-gradient-stops))] from-slate-900 via-[#08080a] to-black font-body text-[#f5f5f7]">
-      <div className="flex min-h-0 flex-1 flex-col overflow-hidden lg:flex-row">
-        <header className="order-0 flex shrink-0 items-center px-4 py-3 lg:hidden">
-          <h1 className={pageTitle}>Pixel By Day</h1>
-        </header>
-        {/* While previewing, panels dim and go truly inert (no pointer or tab
-            focus). The title (h1) and the mobile footer (p) stay interactive. */}
-        <aside
-          aria-label="Effect controls"
-          className="order-2 flex min-h-0 w-full flex-1 flex-col gap-4 overflow-x-hidden overflow-y-auto border-none bg-transparent p-4 pb-[max(1.5rem,env(safe-area-inset-bottom))] lg:order-1 lg:h-full lg:w-80 lg:flex-none lg:shrink-0 lg:gap-6 lg:overflow-y-auto lg:p-6 lg:pb-8"
+    <div className="flex h-dvh flex-col overflow-hidden bg-surface font-body text-ink">
+      {/* Single shared header for every breakpoint — the wordmark used to be
+          duplicated (a mobile-only header row, plus a desktop-only copy inside
+          the sidebar column) because there was no full-width bar spanning the
+          canvas and sidebar. This replaces both with one row. */}
+      <header className="flex shrink-0 items-center gap-3 px-5 py-5 lg:gap-4 lg:px-8 lg:py-7">
+        <svg
+          width="36"
+          height="36"
+          viewBox="0 0 28 28"
+          aria-hidden="true"
+          className="shrink-0"
         >
-        <h1 className={cn(pageTitle, "hidden shrink-0 lg:block")}>Pixel By Day</h1>
-
+          <rect x="0" y="0" width="13" height="13" rx="2.5" fill="var(--color-accent)" />
+          <rect x="15" y="0" width="13" height="13" rx="2.5" fill="var(--color-surface-strong)" />
+          <rect x="0" y="15" width="13" height="13" rx="2.5" fill="var(--color-surface-strong)" />
+          <rect x="15" y="15" width="13" height="13" rx="2.5" fill="var(--color-accent)" />
+        </svg>
+        <div className="flex min-w-0 flex-col leading-tight">
+          <h1 className={pageTitle}>Pixel By Day</h1>
+        </div>
+      </header>
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden lg:flex-row">
+        {/* While previewing, panels dim and go truly inert (no pointer or tab
+            focus). The mobile footer (p) stays interactive. */}
+        <aside
+          ref={controlRailRef}
+          aria-label="Effect controls"
+          className="order-2 flex min-h-0 w-full flex-1 flex-col gap-5 overflow-x-hidden overflow-y-auto border-none bg-transparent p-4 pb-[max(1.5rem,env(safe-area-inset-bottom))] lg:order-2 lg:h-full lg:w-[21rem] lg:flex-none lg:shrink-0 lg:gap-7 lg:overflow-y-auto lg:border-l lg:border-ink/10 lg:p-5 lg:pb-8"
+          style={{
+            // Fades scrolled content into the page background at the top/bottom
+            // edges instead of a hard clip — the aside has no opaque background
+            // of its own, so the section cards dissolve into `bg-surface` behind
+            // it rather than fading to a visible color. Only the edges that
+            // `controlRailFade` says still have hidden content actually fade,
+            // so the rail sits fully opaque at rest when nothing is scrolled.
+            maskImage: controlRailMaskImage(controlRailFade),
+            WebkitMaskImage: controlRailMaskImage(controlRailFade),
+          }}
+        >
         <div
           className={cn(
-            "flex flex-col gap-4 transition-opacity duration-300 lg:gap-6",
+            "flex flex-col gap-5 transition-opacity duration-300 lg:gap-7",
             previewing && "opacity-30"
           )}
           inert={previewing ? true : undefined}
@@ -1287,16 +1487,13 @@ export default function Home() {
           onChange={handleFileChange}
         />
 
-        <RepeatSection
+        <LayoutSection
           passes={passes}
           passesDrag={passesDrag}
           rate={rate}
           setPasses={setPasses}
           setPassesDrag={setPassesDrag}
           setRate={setRate}
-        />
-
-        <LayoutSection
           showCellLayout={showCellLayout}
           handleShowCellLayoutChange={handleShowCellLayoutChange}
           subdivisionLoops={subdivisionLoops}
@@ -1321,6 +1518,14 @@ export default function Home() {
           setRandomSample={setRandomSample}
           weightDither={weightDither}
           setWeightDither={setWeightDither}
+          ditherRamp={ditherRamp}
+          setDitherRamp={setDitherRamp}
+          ditherInvertRamp={ditherInvertRamp}
+          setDitherInvertRamp={setDitherInvertRamp}
+          halftoneRamp={halftoneRamp}
+          setHalftoneRamp={setHalftoneRamp}
+          halftoneInvertRamp={halftoneInvertRamp}
+          setHalftoneInvertRamp={setHalftoneInvertRamp}
           weightInvert={weightInvert}
           setWeightInvert={setWeightInvert}
           weightSurreal={weightSurreal}
@@ -1377,7 +1582,7 @@ export default function Home() {
           setTextureOpacity={setTextureOpacity}
         />
         </div>
-        <p className={cn("px-1 pb-2 text-center text-slate-600 lg:hidden", footerText)}>
+        <p className={cn("px-1 pb-2 text-center lg:hidden", footerText)}>
           Designed and created by{" "}
           <a
             href="https://www.instagram.com/walidazizbash"
@@ -1394,11 +1599,12 @@ export default function Home() {
         One breakpoint (`lg` / 1024px), mobile-first:
         - Below lg: canvas stack is a bounded-height row (never 50vh+), history is a
           horizontal strip, controls take leftover height and always scroll.
-        - lg+: three columns — controls | canvas | history.
+        - lg+: canvas | history | controls — the artwork dominates the left, the
+          control rail sits on the right (see the reference layout).
         `min-w-0` lets the canvas column shrink instead of overflowing the history rail.
       */}
-      <div className="order-1 flex min-h-0 min-w-0 w-full max-lg:h-[min(58dvh,36rem)] max-lg:shrink-0 flex-col lg:order-2 lg:h-full lg:flex-1 lg:flex-row lg:gap-6">
-      <main className="flex min-h-0 min-w-0 flex-1 flex-col px-3 pb-3 pt-0 lg:overflow-hidden lg:p-6">
+      <div className="order-1 flex min-h-0 min-w-0 w-full max-lg:h-[min(58dvh,36rem)] max-lg:shrink-0 flex-col lg:order-1 lg:h-full lg:flex-1 lg:flex-row lg:gap-4">
+      <main className="flex min-h-0 min-w-0 flex-1 flex-col px-3 pb-3 pt-0 lg:overflow-hidden lg:p-4">
         <div
           className={cn(
             floatingCard,
@@ -1422,6 +1628,8 @@ export default function Home() {
             previewing={previewing}
             handleRestore={handleRestore}
             cancelPreview={cancelPreview}
+            imageSrc={imageSrc}
+            fileInputRef={fileInputRef}
             seed={seed}
             setSeed={setSeed}
             autoFillHistory={autoFillHistory}
@@ -1429,8 +1637,6 @@ export default function Home() {
             handleAutoFill={handleAutoFill}
             handleAutoFillBack={handleAutoFillBack}
             handleAutoFillForward={handleAutoFillForward}
-            imageSrc={imageSrc}
-            fileInputRef={fileInputRef}
             isExportingPng={isExportingPng}
             exportHighResImage={exportHighResImage}
             handleBakeClick={handleBakeClick}
@@ -1443,6 +1649,8 @@ export default function Home() {
             setLivePlaySpeed={handleLivePlaySpeedChange}
             speedRamp={speedRamp}
             setSpeedRamp={setSpeedRamp}
+            directionWeights={directionWeights}
+            setDirectionWeights={setDirectionWeights}
           />
         </div>
       </main>
@@ -1459,7 +1667,7 @@ export default function Home() {
       )}
       </div>
       </div>
-      <footer className={cn("hidden w-full shrink-0 border-t border-white/10 py-3 text-center lg:block", footerText)}>
+      <footer className={cn("hidden w-full shrink-0 py-3 text-center lg:block", footerText)}>
         Designed and created by{" "}
         <a
           href="https://www.instagram.com/walidazizbash"

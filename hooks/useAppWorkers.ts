@@ -4,12 +4,14 @@ import { useCallback, useEffect, useRef, useState } from "react"
 import type {
   CompositeTextureSettings,
   CompositeWorkerOutMessage,
+  DirectionWeights,
   EffectSettings,
   EffectWorkerOutMessage,
   SpeedRampPoint,
 } from "@/lib/effect-types"
 import { MAX_DECODE_EDGE, MAX_DECODE_PIXELS } from "@/lib/constants"
 import { DEFAULT_SPEED_RAMP } from "@/lib/speed-ramp"
+import { DEFAULT_DIRECTION_WEIGHTS } from "@/lib/direction-weights"
 
 /** Max edge length for interactive preview / Phase 2+3 worker buffers. */
 const MAX_PREVIEW_DIMENSION = 1200
@@ -98,6 +100,13 @@ type UseAppWorkersOptions = {
    * time, same as the offset.
    */
   speedRamp?: readonly SpeedRampPoint[]
+  /**
+   * Per-Cell Live Play scroll direction weights (see `lib/direction-weights.ts`).
+   * Sibling of `offsetY` / `speedRamp`, not part of `settings` — same reasoning
+   * as `speedRamp` above: it only has an effect once the offset is nonzero, so
+   * it must never trigger the settings-driven regen effect.
+   */
+  directionWeights?: DirectionWeights
   /** Draw a finished composite frame to the live canvas. */
   onPreviewFrame: (width: number, height: number, bitmap: ImageBitmap) => void
   /** Draw the raw source while the first worker job is pending. */
@@ -145,6 +154,7 @@ export function useAppWorkers({
   imageSrc,
   paused = false,
   speedRamp = DEFAULT_SPEED_RAMP,
+  directionWeights = DEFAULT_DIRECTION_WEIGHTS,
   onPreviewFrame,
   onSourcePreview,
 }: UseAppWorkersOptions): UseAppWorkersResult {
@@ -197,6 +207,8 @@ export function useAppWorkers({
   const jobOffsetByIdRef = useRef(new Map<number, number>())
   /** Mirrors the `speedRamp` prop for the same reason as `settingsRef`: read fresh at dispatch time, not captured in a stale closure. */
   const speedRampRef = useRef(speedRamp)
+  /** Mirrors the `directionWeights` prop, same reasoning as `speedRampRef`. */
+  const directionWeightsRef = useRef(directionWeights)
 
   const settingsRef = useRef(settings)
   const onPreviewFrameRef = useRef(onPreviewFrame)
@@ -205,9 +217,10 @@ export function useAppWorkers({
   useEffect(() => {
     settingsRef.current = settings
     speedRampRef.current = speedRamp
+    directionWeightsRef.current = directionWeights
     onPreviewFrameRef.current = onPreviewFrame
     onSourcePreviewRef.current = onSourcePreview
-  }, [settings, speedRamp, onPreviewFrame, onSourcePreview])
+  }, [settings, speedRamp, directionWeights, onPreviewFrame, onSourcePreview])
 
   const rememberJobOffset = useCallback((jobId: number, offsetY: number) => {
     const map = jobOffsetByIdRef.current
@@ -410,6 +423,7 @@ export function useAppWorkers({
       settings: { ...effectSettings },
       offsetY,
       speedRamp: speedRampRef.current,
+      directionWeights: directionWeightsRef.current,
     })
   }, [rememberJobOffset])
 
@@ -725,11 +739,15 @@ export function useAppWorkers({
     settings.passes,
     settings.rate,
     settings.weightDither,
+    settings.ditherRamp,
+    settings.ditherInvertRamp,
     settings.weightInvert,
     settings.weightSurreal,
     settings.weightPixelate,
     settings.weightOriginal,
     settings.halftoneAmount,
+    settings.halftoneRamp,
+    settings.halftoneInvertRamp,
     settings.weightThermal,
     settings.weightSlitScan,
     settings.slitScanAmount,
@@ -766,6 +784,19 @@ export function useAppWorkers({
     if (liveOffsetYRef.current === 0) return
     scheduleRegen()
   }, [paused, speedRamp, scheduleRegen])
+
+  /**
+   * Direction weights, same reasoning as the speed ramp effect above: at
+   * `offsetY === 0` every direction produces the identical static frame, so
+   * dragging these sliders must not spend a full regen until something is
+   * actually scrolled on screen.
+   */
+  useEffect(() => {
+    if (!sourceBitmapRef.current || !workerRef.current) return
+    if (paused) return
+    if (liveOffsetYRef.current === 0) return
+    scheduleRegen()
+  }, [paused, directionWeights, scheduleRegen])
 
   /**
    * Grain-only refresh, reusing the retained Phase 2 frame. Declared after the render

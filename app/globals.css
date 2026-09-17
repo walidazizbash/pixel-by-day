@@ -48,6 +48,21 @@
   --font-heading: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
   --font-footer: var(--font-geist-mono), ui-monospace, monospace;
   --font-mono: var(--font-geist-mono);
+
+  /* Redesign palette — the tokens the UI actually renders with (see :root below).
+     Everything else in this file is the shadcn scaffold kept for the primitives
+     that still read from it (Button/Card/Switch base classes). */
+  --color-surface: var(--surface);
+  --color-surface-card: var(--surface-card);
+  --color-surface-strong: var(--surface-strong);
+  --color-ink: var(--ink);
+  --color-ink-muted: var(--ink-muted);
+  --color-accent: var(--accent);
+  --color-accent-strong: var(--accent-strong);
+  --color-accent-hover: var(--accent-hover);
+  --color-footer-credit: var(--footer-credit);
+  --color-footer-name: var(--footer-name);
+  --color-footer-name-hover: var(--footer-name-hover);
   --color-sidebar-ring: var(--sidebar-ring);
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
@@ -65,8 +80,6 @@
   --color-input: var(--input);
   --color-border: var(--border);
   --color-destructive: var(--destructive);
-  --color-accent-foreground: var(--accent-foreground);
-  --color-accent: var(--accent);
   --color-muted-foreground: var(--muted-foreground);
   --color-muted: var(--muted);
   --color-secondary-foreground: var(--secondary-foreground);
@@ -87,72 +100,88 @@
 }
 
 :root {
-  --background: oklch(1 0 0);
-  --foreground: oklch(0.145 0 0);
-  --card: oklch(1 0 0);
-  --card-foreground: oklch(0.145 0 0);
-  --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.145 0 0);
-  --primary: oklch(0.205 0 0);
-  --primary-foreground: oklch(0.985 0 0);
-  --secondary: oklch(0.97 0 0);
-  --secondary-foreground: oklch(0.205 0 0);
-  --muted: oklch(0.97 0 0);
-  --muted-foreground: oklch(0.556 0 0);
-  --accent: oklch(0.97 0 0);
-  --accent-foreground: oklch(0.205 0 0);
+  color-scheme: dark;
+
+  /* Redesign palette — very dark, muted near-black charcoal surfaces, bright
+     clean white ink, one quiet indigo-blue accent reserved for active/focus/
+     primary state. The app is dark-only (no theme toggle), so these are
+     identical in :root and .dark below. */
+  --surface: #0a0a0d;
+  --surface-card: #111114;
+  --surface-strong: #1c1c21;
+  --ink: #f7f7f8;
+  --ink-muted: #8b8b93;
+  --accent: #4935f0;
+  --accent-strong: #8977f5;
+  --accent-hover: color-mix(in oklab, var(--accent) 72%, black);
+
+  /* Footer — 2× callout border / fill contrast (see components/controls/styles.ts). */
+  --footer-credit: rgb(247 247 248 / 20%);
+  --footer-name: rgb(112 112 132);
+  --footer-name-hover: rgb(122 122 142);
+
+  --background: var(--surface);
+  --foreground: var(--ink);
+  --card: var(--surface-card);
+  --card-foreground: var(--ink);
+  --popover: var(--surface-card);
+  --popover-foreground: var(--ink);
+  --primary: var(--accent);
+  --primary-foreground: var(--ink);
+  --secondary: var(--surface-strong);
+  --secondary-foreground: var(--ink);
+  --muted: var(--surface-strong);
+  --muted-foreground: var(--ink-muted);
   --destructive: oklch(0.577 0.245 27.325);
-  --border: oklch(0.922 0 0);
-  --input: oklch(0.922 0 0);
-  --ring: oklch(0.708 0 0);
+  --border: rgb(247 247 248 / 10%);
+  --input: rgb(247 247 248 / 15%);
+  --ring: var(--accent);
   --chart-1: oklch(0.87 0 0);
   --chart-2: oklch(0.556 0 0);
   --chart-3: oklch(0.439 0 0);
   --chart-4: oklch(0.371 0 0);
   --chart-5: oklch(0.269 0 0);
-  --radius: 0.625rem;
-  --sidebar: oklch(0.985 0 0);
-  --sidebar-foreground: oklch(0.145 0 0);
-  --sidebar-primary: oklch(0.205 0 0);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.97 0 0);
-  --sidebar-accent-foreground: oklch(0.205 0 0);
-  --sidebar-border: oklch(0.922 0 0);
-  --sidebar-ring: oklch(0.708 0 0);
+  --radius: 0.875rem;
+  --sidebar: var(--surface-card);
+  --sidebar-foreground: var(--ink);
+  --sidebar-primary: var(--accent);
+  --sidebar-primary-foreground: var(--ink);
+  --sidebar-accent: var(--surface-strong);
+  --sidebar-accent-foreground: var(--ink);
+  --sidebar-border: rgb(247 247 248 / 10%);
+  --sidebar-ring: var(--accent);
 }
 
 .dark {
-  --background: oklch(0.145 0 0);
-  --foreground: oklch(0.985 0 0);
-  --card: oklch(0.205 0 0);
-  --card-foreground: oklch(0.985 0 0);
-  --popover: oklch(0.205 0 0);
-  --popover-foreground: oklch(0.985 0 0);
-  --primary: oklch(0.922 0 0);
-  --primary-foreground: oklch(0.205 0 0);
-  --secondary: oklch(0.269 0 0);
-  --secondary-foreground: oklch(0.985 0 0);
-  --muted: oklch(0.269 0 0);
-  --muted-foreground: oklch(0.708 0 0);
-  --accent: oklch(0.269 0 0);
-  --accent-foreground: oklch(0.985 0 0);
+  --background: var(--surface);
+  --foreground: var(--ink);
+  --card: var(--surface-card);
+  --card-foreground: var(--ink);
+  --popover: var(--surface-card);
+  --popover-foreground: var(--ink);
+  --primary: var(--accent);
+  --primary-foreground: var(--ink);
+  --secondary: var(--surface-strong);
+  --secondary-foreground: var(--ink);
+  --muted: var(--surface-strong);
+  --muted-foreground: var(--ink-muted);
   --destructive: oklch(0.704 0.191 22.216);
-  --border: oklch(1 0 0 / 10%);
-  --input: oklch(1 0 0 / 15%);
-  --ring: oklch(0.556 0 0);
+  --border: rgb(247 247 248 / 10%);
+  --input: rgb(247 247 248 / 15%);
+  --ring: var(--accent);
   --chart-1: oklch(0.87 0 0);
   --chart-2: oklch(0.556 0 0);
   --chart-3: oklch(0.439 0 0);
   --chart-4: oklch(0.371 0 0);
   --chart-5: oklch(0.269 0 0);
-  --sidebar: oklch(0.205 0 0);
-  --sidebar-foreground: oklch(0.985 0 0);
-  --sidebar-primary: oklch(0.488 0.243 264.376);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.269 0 0);
-  --sidebar-accent-foreground: oklch(0.985 0 0);
-  --sidebar-border: oklch(1 0 0 / 10%);
-  --sidebar-ring: oklch(0.556 0 0);
+  --sidebar: var(--surface-card);
+  --sidebar-foreground: var(--ink);
+  --sidebar-primary: var(--accent);
+  --sidebar-primary-foreground: var(--ink);
+  --sidebar-accent: var(--surface-strong);
+  --sidebar-accent-foreground: var(--ink);
+  --sidebar-border: rgb(247 247 248 / 10%);
+  --sidebar-ring: var(--accent);
 }
 
 @layer base {
@@ -164,8 +193,8 @@
   }
   body {
     @apply font-body antialiased;
-    background-color: #000000;
-    color: #f5f5f7;
+    background-color: var(--background);
+    color: var(--foreground);
   }
 
   h1,

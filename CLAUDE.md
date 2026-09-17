@@ -4,6 +4,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 @AGENTS.md
 
+## Design-work safety rule
+
+When working on frontend design, styling, layout, typography, animation, or visual polish:
+
+- Treat the existing rendering pipeline, algorithms, workers, caches, image-processing logic, settings behavior, upload flow, Bake flow, History behavior, and export behavior as locked.
+- Do not refactor, simplify, rewrite, or replace functional logic unless I explicitly ask.
+- Prefer changes limited to presentation and UI structure.
+- If a visual change appears to require changing application logic, stop and explain why before modifying it.
+
 ## What this app does
 
 Pixel By Day turns an uploaded photo into a mosaic/glitch-art image driven by sliders. It is entirely client-side: no server, no database, no accounts, no persistence. The only route is `/` (`app/page.tsx`); everything else in `app/` is metadata (SEO, OG images, robots, sitemap).
@@ -118,3 +127,27 @@ The traffic controller between UI state and the two workers.
 
 - `next.config.ts` sets a strict CSP. `worker-src 'self' blob:` and `connect-src 'self'` are what let the workers run and fetch the grain texture; adding any external asset, font, or endpoint requires editing that policy.
 - `NEXT_PUBLIC_SITE_URL` (see `.env.example`) sets the canonical origin for metadata/robots/sitemap; `lib/site.ts` falls back to Vercel env vars, then a hardcoded production origin.
+
+## Frontend design tools
+
+Use these tools automatically when relevant:
+
+- frontend-design: use for layout, typography, spacing, hierarchy, color, and overall interface design.
+- design-taste-frontend: use when the interface feels generic, bland, or too AI-generated and needs stronger visual taste.
+- web-design-guidelines: use to audit UI quality, accessibility, usability, and weak design decisions.
+- playwright-cli: after meaningful visual changes, open the app in the browser and inspect the result visually. Use screenshots when helpful.
+- 21st.dev: use its skills or MCP tools when a polished existing component, pattern, or design reference would improve the interface.
+
+Do not use every tool for every request. Choose the relevant ones based on the task.
+
+For frontend redesign work, preserve the existing application logic and follow the existing Design-work safety rule.
+
+## graphify
+
+This project has a knowledge graph at graphify-out/ with god nodes, community structure, and cross-file relationships.
+
+Rules:
+- For codebase questions, first run `graphify query "<question>"` when graphify-out/graph.json exists. Use `graphify path "<A>" "<B>"` for relationships and `graphify explain "<concept>"` for focused concepts. These return a scoped subgraph, usually much smaller than GRAPH_REPORT.md or raw grep output.
+- If graphify-out/wiki/index.md exists, use it for broad navigation instead of raw source browsing.
+- Read graphify-out/GRAPH_REPORT.md only for broad architecture review or when query/path/explain do not surface enough context.
+- After modifying code, run `graphify update .` to keep the graph current (AST-only, no API cost).

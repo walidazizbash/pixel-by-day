@@ -1,21 +1,187 @@
 "use client"
 
-import type { Dispatch, SetStateAction } from "react"
-import { memo } from "react"
-import type { SlitScanMode } from "@/lib/effect-types"
+import { memo, useCallback, useEffect, useRef, useState } from "react"
+import type {
+  Dispatch,
+  PointerEvent as ReactPointerEvent,
+  ReactNode,
+  SetStateAction,
+} from "react"
+import { createPortal } from "react-dom"
+import { Contrast, Spline } from "lucide-react"
+import type { SlitScanMode, SpeedRampPoint } from "@/lib/effect-types"
 import { CollapsibleCallout } from "@/components/collapsible-callout"
 import { Slider } from "@/components/ui/slider"
 import { Switch } from "@/components/ui/switch"
 import { ResetAmountButton } from "@/components/controls/ResetAmountButton"
 import { SlitScanSection } from "@/components/controls/SlitScanSection"
+import {
+  SpeedRampCurve,
+  type RampAxisLabels,
+} from "@/components/controls/SpeedRampCurve"
 import { CONTROL_DEFAULTS, sliderValue } from "@/components/controls/defaults"
+import {
+  DEFAULT_DITHER_RAMP,
+  DEFAULT_HALFTONE_RAMP,
+  DEFAULT_INVERT_RAMP,
+  DITHER_RAMP_Y_MAX,
+  DITHER_RAMP_Y_MIN,
+  DITHER_RAMP_Y_NEUTRAL,
+  INVERT_RAMP_Y_MAX,
+  INVERT_RAMP_Y_MIN,
+  INVERT_RAMP_Y_NEUTRAL,
+} from "@/lib/dither-ramp"
 import { controlField, controlLabel, floatingCard, sectionTitle, sliderRow, sliderTrackClass, sliderValueReadout } from "@/components/controls/styles"
+import { cn } from "@/lib/utils"
+
+function preventTouchScroll(event: ReactPointerEvent<HTMLElement>) {
+  if (event.pointerType === "touch") event.preventDefault()
+}
+
+function InvertYMark({ filled }: { filled: boolean }) {
+  return (
+    <span
+      className={cn(
+        "block size-2.5 rounded-full border-[1.5px] border-current",
+        filled ? "bg-current" : "bg-transparent"
+      )}
+    />
+  )
+}
+
+function TextureRampButton({
+  title,
+  hint,
+  ramp,
+  setRamp,
+  defaultRamp,
+  icon,
+  labels,
+  yMin,
+  yMax,
+  baselineY,
+}: {
+  title: string
+  hint: string
+  ramp: SpeedRampPoint[]
+  setRamp: Dispatch<SetStateAction<SpeedRampPoint[]>>
+  defaultRamp: readonly SpeedRampPoint[]
+  icon: ReactNode
+  labels: RampAxisLabels
+  yMin: number
+  yMax: number
+  baselineY: number | false
+}) {
+  const [open, setOpen] = useState(false)
+  const anchorRef = useRef<HTMLDivElement>(null)
+  const panelRef = useRef<HTMLDivElement>(null)
+  const [pos, setPos] = useState<{ top: number; left: number } | null>(null)
+
+  const place = useCallback(() => {
+    const anchor = anchorRef.current
+    if (!anchor) return
+    const r = anchor.getBoundingClientRect()
+    const width = 288
+    const gap = 8
+    let left = r.right + gap
+    let top = r.top
+    if (left + width > window.innerWidth - 8) {
+      left = Math.max(8, r.left)
+      top = r.bottom + gap
+    }
+    setPos({ top, left })
+  }, [])
+
+  useEffect(() => {
+    if (!open) return
+    place()
+    function handlePointerDown(event: PointerEvent) {
+      const target = event.target as Node
+      if (anchorRef.current?.contains(target) || panelRef.current?.contains(target)) {
+        return
+      }
+      setOpen(false)
+    }
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") setOpen(false)
+    }
+    document.addEventListener("pointerdown", handlePointerDown)
+    document.addEventListener("keydown", handleKeyDown)
+    window.addEventListener("resize", place)
+    window.addEventListener("scroll", place, true)
+    return () => {
+      document.removeEventListener("pointerdown", handlePointerDown)
+      document.removeEventListener("keydown", handleKeyDown)
+      window.removeEventListener("resize", place)
+      window.removeEventListener("scroll", place, true)
+    }
+  }, [open, place])
+
+  return (
+    <div className="relative" ref={anchorRef}>
+      <button
+        type="button"
+        aria-label={open ? `Close ${title} editor` : `Open ${title} editor`}
+        aria-expanded={open}
+        onClick={() => setOpen((prev) => !prev)}
+        className={cn(
+          "inline-flex size-8 shrink-0 items-center justify-center rounded-lg border border-ink/15 text-ink-muted transition-colors hover:text-ink",
+          open ? "bg-ink/10 text-ink" : "bg-transparent"
+        )}
+      >
+        {icon}
+      </button>
+      {open &&
+        pos &&
+        createPortal(
+          <div
+            ref={panelRef}
+            className="fixed z-50 w-72 touch-none rounded-xl border border-ink/15 bg-surface-card px-4 py-3 text-ink shadow-[0_16px_48px_rgba(0,0,0,0.5)]"
+            style={{
+              top: pos.top,
+              left: pos.left,
+              touchAction: "none",
+            }}
+            onPointerDown={preventTouchScroll}
+          >
+            <SpeedRampCurve
+              title={title}
+              speedRamp={ramp}
+              setSpeedRamp={setRamp}
+              yMin={yMin}
+              yMax={yMax}
+              defaultRamp={defaultRamp}
+              baselineY={baselineY}
+              ariaLabel={`${title} — ${hint}`}
+              resetAriaLabel={`Reset ${title} to default curve`}
+              labels={labels}
+            />
+          </div>,
+          document.body
+        )}
+    </div>
+  )
+}
+
+const INVERT_RAMP_LABELS: RampAxisLabels = {
+  yTop: <InvertYMark filled={false} />,
+  yBottom: <InvertYMark filled />,
+  xCenter: "% of Cells",
+}
 
 type BaseEffectsSectionProps = {
   randomSample: boolean
   setRandomSample: Dispatch<SetStateAction<boolean>>
   weightDither: number
   setWeightDither: Dispatch<SetStateAction<number>>
+  ditherRamp: SpeedRampPoint[]
+  setDitherRamp: Dispatch<SetStateAction<SpeedRampPoint[]>>
+  ditherInvertRamp: SpeedRampPoint[]
+  setDitherInvertRamp: Dispatch<SetStateAction<SpeedRampPoint[]>>
+  halftoneRamp: SpeedRampPoint[]
+  setHalftoneRamp: Dispatch<SetStateAction<SpeedRampPoint[]>>
+  halftoneInvertRamp: SpeedRampPoint[]
+  setHalftoneInvertRamp: Dispatch<SetStateAction<SpeedRampPoint[]>>
   weightInvert: number
   setWeightInvert: Dispatch<SetStateAction<number>>
   weightSurreal: number
@@ -51,6 +217,14 @@ export const BaseEffectsSection = memo(function BaseEffectsSection({
   setRandomSample,
   weightDither,
   setWeightDither,
+  ditherRamp,
+  setDitherRamp,
+  ditherInvertRamp,
+  setDitherInvertRamp,
+  halftoneRamp,
+  setHalftoneRamp,
+  halftoneInvertRamp,
+  setHalftoneInvertRamp,
   weightInvert,
   setWeightInvert,
   weightSurreal,
@@ -219,6 +393,34 @@ export const BaseEffectsSection = memo(function BaseEffectsSection({
             <label htmlFor="weight-dither" className={controlLabel}>
               Dither
             </label>
+            <TextureRampButton
+              title="Dither Scale"
+              hint="shape how pattern size varies across Cells"
+              ramp={ditherRamp}
+              setRamp={setDitherRamp}
+              defaultRamp={DEFAULT_DITHER_RAMP}
+              icon={<Spline className="size-4" strokeWidth={2} aria-hidden />}
+              yMin={DITHER_RAMP_Y_MIN}
+              yMax={DITHER_RAMP_Y_MAX}
+              baselineY={DITHER_RAMP_Y_NEUTRAL}
+              labels={{
+                yTop: "8x",
+                yBottom: "1x",
+                xCenter: "% of Cells",
+              }}
+            />
+            <TextureRampButton
+              title="Dither Invert"
+              hint="shape how many Cells swap ink and paper"
+              ramp={ditherInvertRamp}
+              setRamp={setDitherInvertRamp}
+              defaultRamp={DEFAULT_INVERT_RAMP}
+              icon={<Contrast className="size-4" strokeWidth={2} aria-hidden />}
+              yMin={INVERT_RAMP_Y_MIN}
+              yMax={INVERT_RAMP_Y_MAX}
+              baselineY={INVERT_RAMP_Y_NEUTRAL}
+              labels={INVERT_RAMP_LABELS}
+            />
           </div>
           <div className={sliderRow}>
             <Slider
@@ -255,6 +457,34 @@ export const BaseEffectsSection = memo(function BaseEffectsSection({
             <label htmlFor="halftone-amount" className={controlLabel}>
               Halftone
             </label>
+            <TextureRampButton
+              title="Halftone Scale"
+              hint="shape how pattern size varies across Cells"
+              ramp={halftoneRamp}
+              setRamp={setHalftoneRamp}
+              defaultRamp={DEFAULT_HALFTONE_RAMP}
+              icon={<Spline className="size-4" strokeWidth={2} aria-hidden />}
+              yMin={DITHER_RAMP_Y_MIN}
+              yMax={DITHER_RAMP_Y_MAX}
+              baselineY={DITHER_RAMP_Y_NEUTRAL}
+              labels={{
+                yTop: "6x",
+                yBottom: "1x",
+                xCenter: "% of Cells",
+              }}
+            />
+            <TextureRampButton
+              title="Halftone Invert"
+              hint="shape how many Cells swap ink and paper"
+              ramp={halftoneInvertRamp}
+              setRamp={setHalftoneInvertRamp}
+              defaultRamp={DEFAULT_INVERT_RAMP}
+              icon={<Contrast className="size-4" strokeWidth={2} aria-hidden />}
+              yMin={INVERT_RAMP_Y_MIN}
+              yMax={INVERT_RAMP_Y_MAX}
+              baselineY={INVERT_RAMP_Y_NEUTRAL}
+              labels={INVERT_RAMP_LABELS}
+            />
           </div>
           <div className={sliderRow}>
             <Slider

@@ -1,7 +1,8 @@
 import { ImageResponse } from "next/og"
+import { SITE_TAGLINE, SITE_TITLE } from "@/lib/site"
 
 export const runtime = "nodejs"
-export const alt = "Pixel By Day | Generative Pixel Effects"
+export const alt = SITE_TITLE
 export const size = { width: 1200, height: 630 }
 export const contentType = "image/png"
 
@@ -17,8 +18,8 @@ export default function OpenGraphImage() {
           justifyContent: "space-between",
           padding: 64,
           background:
-            "radial-gradient(ellipse at top left, #1e293b 0%, #08080a 45%, #000000 100%)",
-          color: "#f5f5f7",
+            "radial-gradient(ellipse at top left, #1c1c21 0%, #0a0a0d 45%, #0a0a0d 100%)",
+          color: "#f7f7f8",
           fontFamily: "ui-sans-serif, system-ui, sans-serif",
         }}
       >
@@ -28,7 +29,7 @@ export default function OpenGraphImage() {
             fontSize: 28,
             letterSpacing: 4,
             textTransform: "uppercase",
-            color: "#94a3b8",
+            color: "#8b8b93",
           }}
         >
           Generative Pixel Effects
@@ -49,15 +50,15 @@ export default function OpenGraphImage() {
             style={{
               display: "flex",
               fontSize: 32,
-              color: "#cbd5e1",
+              color: "#c4c4ca",
               maxWidth: 900,
               lineHeight: 1.35,
             }}
           >
-            Distort your images using abstract pixel effects.
+            {SITE_TAGLINE}
           </div>
         </div>
-        <div style={{ display: "flex", fontSize: 24, color: "#64748b" }}>
+        <div style={{ display: "flex", fontSize: 24, color: "#8b8b93" }}>
           pixelbyday.com
         </div>
       </div>
