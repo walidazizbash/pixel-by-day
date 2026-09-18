@@ -83,13 +83,29 @@ function TextureRampButton({
     const r = anchor.getBoundingClientRect()
     const width = 288
     const gap = 8
-    let left = r.right + gap
-    let top = r.top
-    if (left + width > window.innerWidth - 8) {
-      left = Math.max(8, r.left)
-      top = r.bottom + gap
-    }
-    setPos({ top, left })
+    const margin = 8
+    // Same breakpoint as the page layout (`lg` / 1024px): desktop rail sits
+    // on the right, so the graph opens to the left of the button. Below that
+    // the controls are full-width — center the panel in the viewport.
+    const desktop = window.innerWidth >= 1024
+    const left = desktop
+      ? Math.max(margin, r.left - width - gap)
+      : Math.max(
+          margin,
+          Math.min(
+            (window.innerWidth - width) / 2,
+            window.innerWidth - width - margin
+          )
+        )
+    // Fallback so the first paint is already vertically centered — the panel
+    // is not in the DOM yet on the opening `place()` call (~195px measured).
+    const height = panelRef.current?.offsetHeight || 195
+    let top = r.top + r.height / 2 - height / 2
+    top = Math.min(top, window.innerHeight - height - margin)
+    top = Math.max(margin, top)
+    setPos((prev) =>
+      prev && prev.top === top && prev.left === left ? prev : { top, left }
+    )
   }, [])
 
   useEffect(() => {
@@ -116,6 +132,12 @@ function TextureRampButton({
       window.removeEventListener("scroll", place, true)
     }
   }, [open, place])
+
+  useEffect(() => {
+    if (!open || !pos) return
+    const frame = requestAnimationFrame(place)
+    return () => cancelAnimationFrame(frame)
+  }, [open, pos, place])
 
   return (
     <div className="relative" ref={anchorRef}>
